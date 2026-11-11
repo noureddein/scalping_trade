@@ -46,7 +46,7 @@ design.*
 
 | Principle | Status | Notes |
 |-----------|--------|-------|
-| I. Platform Target | Pass | Topology recorded in §14.1; spec validates it (FR-005) |
+| I. Platform Target | Pass | Topology recorded in §14.1; spec validates it (FR-001) |
 | II. Fail-Closed Configuration | Pass | §19 catalogues all unresolved parameters; spec verifies no invented defaults (FR-005) |
 | III. Read-Only Broker Connector | Pass | §14.1 trading authority row confirms read-only; no broker interaction in design phase |
 | IV. Role Separation | Pass | Claude creates spec/plan; owner validates design completeness |

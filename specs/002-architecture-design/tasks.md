@@ -20,7 +20,7 @@ pass/fail evidence against the master plan and strategy design document.
 
 **Purpose**: Prepare validation tools and load documents
 
-- [ ] T001 Create validation script at scripts/verify_phase1.sh that runs all automated cross-reference and consistency checks from quickstart.md and outputs a structured PASS/FAIL summary
+- [X] T001 Create validation script at scripts/verify_phase1.sh that runs all automated cross-reference and consistency checks from quickstart.md and outputs a structured PASS/FAIL summary
 
 ---
 
@@ -28,7 +28,7 @@ pass/fail evidence against the master plan and strategy design document.
 
 **Purpose**: Load and index both source-of-truth documents for cross-referencing
 
-- [ ] T002 Build a section index of FOREX_SCALPING_MASTER_PLAN.md (§§1–21 with line ranges) to enable targeted validation of each domain and cross-reference auditing
+- [X] T002 Build a section index of FOREX_SCALPING_MASTER_PLAN.md (§§1–21 with line ranges) to enable targeted validation of each domain and cross-reference auditing; see section-index.md
 
 **Checkpoint**: Section index ready, validation can begin
 
@@ -40,9 +40,9 @@ pass/fail evidence against the master plan and strategy design document.
 
 **Independent Test**: Read §14.1 and verify every row has a concrete approved value, no "TBD"
 
-- [ ] T003 [US1] Review FOREX_SCALPING_MASTER_PLAN.md §14.1 (approved decisions table) and verify every architecture area has a single, unambiguous approved value — no "TBD", no open research questions
-- [ ] T004 [US1] Cross-reference §14.1 approved decisions against §§3–13 — verify no section contradicts the approved decision; where earlier sections present research options, confirm the approved option is clearly identified
-- [ ] T005 [US1] Cross-reference §14.1 approved decisions against constitution Principles I–IX — verify all 9 principles are consistent with the approved decisions
+- [X] T003 [US1] Review FOREX_SCALPING_MASTER_PLAN.md §14.1 (approved decisions table) and verify every architecture area has a single, unambiguous approved value — no "TBD", no open research questions
+- [X] T004 [US1] Cross-reference §14.1 approved decisions against §§3–13 — verify no section contradicts the approved decision; where earlier sections present research options, confirm the approved option is clearly identified
+- [X] T005 [US1] Cross-reference §14.1 approved decisions against constitution Principles I–IX — verify all 9 principles are consistent with the approved decisions
 
 **Checkpoint**: Architecture decisions validated as complete and internally consistent
 
@@ -54,11 +54,11 @@ pass/fail evidence against the master plan and strategy design document.
 
 **Independent Test**: Review each domain for completeness — no gaps requiring implementer invention
 
-- [ ] T006 [P] [US2] Review FOREX_SCALPING_MASTER_PLAN.md §§5–6 (broker abstraction, symbol registry/contract specs) — verify functional requirements, key entities, and constraints are stated without gaps
-- [ ] T007 [P] [US2] Review FOREX_SCALPING_MASTER_PLAN.md §§7–8 (pair management, strategy architecture) — verify functional requirements, key entities, and constraints are stated without gaps
-- [ ] T008 [P] [US2] Review FOREX_SCALPING_MASTER_PLAN.md §§9–11 (trade entry/execution, position management, P/L management) — verify functional requirements, key entities, and constraints are stated without gaps
-- [ ] T009 [P] [US2] Review FOREX_SCALPING_MASTER_PLAN.md §§12–13 (daily risk management, spread intelligence, dashboard) — verify functional requirements, key entities, and constraints are stated without gaps
-- [ ] T010 [US2] Review FOREX_SCALPING_MASTER_PLAN.md §14.2 (database design) — verify conceptual entities, integrity constraints, migration policy, cross-system order safety rules, and admission/recovery contracts are specified
+- [X] T006 [P] [US2] Review FOREX_SCALPING_MASTER_PLAN.md §§5–6 (broker abstraction, symbol registry/contract specs) — verify functional requirements, key entities, and constraints are stated without gaps
+- [X] T007 [P] [US2] Review FOREX_SCALPING_MASTER_PLAN.md §§7–8 (pair management, strategy architecture) — verify functional requirements, key entities, and constraints are stated without gaps
+- [X] T008 [P] [US2] Review FOREX_SCALPING_MASTER_PLAN.md §§9–11 (trade entry/execution, position management, P/L management) — verify functional requirements, key entities, and constraints are stated without gaps
+- [X] T009 [P] [US2] Review FOREX_SCALPING_MASTER_PLAN.md §§12–13 (daily risk management, spread intelligence, dashboard) — verify functional requirements, key entities, and constraints are stated without gaps
+- [X] T010 [US2] Review FOREX_SCALPING_MASTER_PLAN.md §14.2 (database design) — verify conceptual entities, integrity constraints, migration policy, cross-system order safety rules, and admission/recovery contracts are specified; entity-list contradiction reported in quickstart.md
 
 **Checkpoint**: All domain sections pass completeness review
 
@@ -70,9 +70,9 @@ pass/fail evidence against the master plan and strategy design document.
 
 **Independent Test**: Read §19; verify each entry has number, description, and blocking context
 
-- [ ] T011 [US3] Review FOREX_SCALPING_MASTER_PLAN.md §19 — verify all 18 unresolved decisions are numbered with descriptions and sufficient context for the owner to make an informed choice
-- [ ] T012 [US3] Audit all cross-references to §19 throughout the master plan — verify every "§19" or "unresolved decision" reference points to a valid §19 entry number, and no dangling references exist
-- [ ] T013 [US3] Verify no strategy threshold, exit rule, spread limit, slippage tolerance, dwell time, data source, or acceptance criterion has been invented anywhere in the plan — each must appear as an unresolved §19 entry (FR-005, constitution Principle VII)
+- [X] T011 [US3] Review FOREX_SCALPING_MASTER_PLAN.md §19 — verify all unresolved decisions are numbered with descriptions and sufficient context for the owner to make an informed choice; report the total count (18; context gaps reported in quickstart.md)
+- [X] T012 [US3] Audit all cross-references to §19 throughout the master plan — verify every "§19" or "unresolved decision" reference points to a valid §19 entry number, and no dangling references exist
+- [X] T013 [US3] Verify no strategy threshold, exit rule, spread limit, slippage tolerance, dwell time, data source, or acceptance criterion has been invented anywhere in the plan — each must appear as an unresolved §19 entry (FR-005, constitution Principle VII); unlisted 60-second spread-stability requirement reported in quickstart.md
 
 **Checkpoint**: All unresolved decisions are tracked and no parameters are invented
 
@@ -84,8 +84,8 @@ pass/fail evidence against the master plan and strategy design document.
 
 **Independent Test**: Compare shared topics between documents
 
-- [ ] T014 [P] [US4] Verify TRADING_STRATEGY_DESIGN.md header/scope explicitly states that FOREX_SCALPING_MASTER_PLAN.md is canonical for phase status and safety gates
-- [ ] T015 [US4] Compare strategy names, regime states, data conventions, and safety constraints between TRADING_STRATEGY_DESIGN.md and FOREX_SCALPING_MASTER_PLAN.md §7 — report any contradictions to the owner
+- [X] T014 [P] [US4] Verify TRADING_STRATEGY_DESIGN.md header/scope explicitly states that FOREX_SCALPING_MASTER_PLAN.md is canonical for phase status and safety gates
+- [X] T015 [US4] Compare strategy names, regime states, data conventions, and safety constraints between TRADING_STRATEGY_DESIGN.md and FOREX_SCALPING_MASTER_PLAN.md §7 — report any contradictions to the owner
 
 **Checkpoint**: Both documents are consistent on all shared topics
 
@@ -97,8 +97,8 @@ pass/fail evidence against the master plan and strategy design document.
 
 **Independent Test**: Read §21 and verify each criterion is verifiable
 
-- [ ] T016 [US5] Review FOREX_SCALPING_MASTER_PLAN.md §21 — verify it contains at least 10 concrete, testable production-readiness criteria (SC-005)
-- [ ] T017 [US5] Verify §21 includes the final rule: live trading requires explicit owner authorization — and that this is stated as a non-negotiable gate, not a suggestion
+- [X] T016 [US5] Review FOREX_SCALPING_MASTER_PLAN.md §21 — verify it contains at least 10 concrete, testable production-readiness criteria (SC-005)
+- [X] T017 [US5] Verify §21 includes the final rule: live trading requires explicit owner authorization — and that this is stated as a non-negotiable gate, not a suggestion
 
 **Checkpoint**: Definition of success is concrete, measurable, and includes the live-trading authorization gate
 
@@ -108,9 +108,9 @@ pass/fail evidence against the master plan and strategy design document.
 
 **Purpose**: Assemble evidence and report results
 
-- [ ] T018 Run the validation script (T001) end-to-end and capture output as Phase 1 acceptance evidence
-- [ ] T019 Fill the quickstart.md validation summary with actual PASS/FAIL results from each check
-- [ ] T020 Report any failures, contradictions, or incomplete sections to the owner with specific section references and remediation suggestions
+- [X] T018 Run the validation script (T001) end-to-end and capture output as Phase 1 acceptance evidence
+- [X] T019 Fill the quickstart.md validation summary with actual PASS/FAIL results from each check
+- [X] T020 Report failures, contradictions, or incomplete sections in quickstart.md with section references and remediation suggestions
 
 ---
 
