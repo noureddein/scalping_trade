@@ -36,6 +36,11 @@ A single MT5 Demo account's properties.
 
 **Refresh**: Updated on each account info message from the EA.
 
+**Wire-to-domain field mapping**: the existing EA wire names `login`,
+`server`, and `margin_free` map to `account_number`, `broker_name`, and
+the domain's `margin` field respectively. `margin` therefore means free
+margin in this Phase 2 model; it is not a claim about used margin.
+
 ### CanonicalSymbol
 
 An internal, broker-independent symbol identifier.
@@ -89,9 +94,15 @@ The broker's trading contract details for a mapped symbol.
 | swap_long | Overnight swap for long | Decimal |
 | swap_short | Overnight swap for short | Decimal |
 
-**Validation**: All 13 required fields must be present and valid.
+**Validation**: All 15 required fields must be present and valid.
 If any field is missing or unparseable, the symbol is marked ineligible
 (FR-008).
+
+**Wire-to-domain field mapping**: `margin_initial` maps to
+`margin_requirement`, and `commission_per_lot` maps to `commission`.
+The current flat per-lot commission field cannot represent tiered or
+otherwise conditional commission schedules; such schedules are rejected
+as incomplete rather than flattened into an assumed value.
 
 ## Relationships
 

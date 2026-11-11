@@ -17,11 +17,20 @@ from decimal import Decimal
 
 from .broker_types import (
     AccountInfo,
+    BrokerSymbol,
     ConnectionStatus,
     ContractSpec,
     SymbolMapping,
 )
 from .risk_gate import FOREX_CURRENCIES, _CANONICAL_PAIR, _NON_FOREX_BASES
+
+
+class BrokerUnavailableError(RuntimeError):
+    """Raised when broker data is not fresh and connected for this session."""
+
+
+class SymbolUnavailableError(LookupError):
+    """Raised when a broker symbol was not discovered or has no valid contract."""
 
 
 class BrokerAdapter(abc.ABC):
@@ -44,17 +53,29 @@ class BrokerAdapter(abc.ABC):
     def health_check(self) -> ConnectionStatus:
         """Non-mutating connectivity probe."""
 
+    def get_connection_state(self) -> ConnectionStatus:
+        """Return the current connection state, including reconnecting."""
+        return self.health_check()
+
     @abc.abstractmethod
     def get_account_info(self) -> AccountInfo | None:
         """Return account details or None if unavailable."""
 
     @abc.abstractmethod
-    def discover_symbols(self) -> list[str]:
-        """Return all available broker symbol names. Read-only."""
+    def discover_symbols(self) -> list[BrokerSymbol]:
+        """Return discovered broker symbols with their trading permissions."""
 
     @abc.abstractmethod
     def get_contract_spec(self, broker_symbol: str) -> ContractSpec | None:
-        """Return contract specification for one symbol, or None."""
+        """Return a fresh spec or raise SymbolUnavailableError/BrokerUnavailableError."""
+
+    def update_mapping(self, canonical_name: str, broker_name: str) -> SymbolMapping:
+        """Owner-confirm a mapping for a currently discovered broker symbol."""
+        raise NotImplementedError
+
+    def get_mapping(self, canonical_name: str) -> SymbolMapping | None:
+        """Return an owner-confirmed in-memory mapping, if one exists."""
+        raise NotImplementedError
 
 
 def _is_forex_canonical(pair: str) -> bool:
@@ -89,14 +110,18 @@ def discover_canonical_mappings(
     symbols = adapter.discover_symbols()
     mappings: list[SymbolMapping] = []
 
-    for broker_sym in symbols:
+    for symbol in symbols:
+        broker_sym = symbol.broker_name
         canonical = overrides.get(broker_sym)
         if canonical is None:
             canonical = _infer_canonical(broker_sym)
         if canonical is None or not _is_forex_canonical(canonical):
             continue
 
-        spec = adapter.get_contract_spec(broker_sym)
+        try:
+            spec = adapter.get_contract_spec(broker_sym)
+        except SymbolUnavailableError:
+            continue
         if spec is None:
             continue
 

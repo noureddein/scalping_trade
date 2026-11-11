@@ -13,8 +13,9 @@ from decimal import Decimal
 
 import pytest
 
+from scalping_core.broker_adapter import BrokerUnavailableError, SymbolUnavailableError
 from scalping_core.broker_types import ConnectionStatus
-from scalping_core.tcp_broker_adapter import TcpBrokerAdapter
+from scalping_core.tcp_broker_adapter import TcpBrokerAdapter, recv_message
 
 
 def _find_free_port() -> int:
@@ -69,7 +70,7 @@ class TestTcpConnect:
         try:
             _send_message(client, "heartbeat", {})
             time.sleep(0.1)
-            assert adapter.health_check() is ConnectionStatus.CONNECTED
+            assert adapter.health_check() is ConnectionStatus.RECONNECTING
         finally:
             client.close()
 
@@ -106,7 +107,8 @@ class TestTcpAccountInfo:
 
     def test_returns_none_when_no_data(self, adapter):
         adapter.connect()
-        assert adapter.get_account_info() is None
+        with pytest.raises(BrokerUnavailableError):
+            adapter.get_account_info()
 
     def test_stale_data_returns_none(self):
         port = _find_free_port()
@@ -117,10 +119,11 @@ class TestTcpAccountInfo:
             try:
                 _send_message(client, "account_info", {
                     "login": 1, "server": "s", "currency": "USD",
-                    "balance": "0", "equity": "0", "margin_free": "0",
+                    "balance": "100", "equity": "100", "margin_free": "0",
                 })
                 time.sleep(0.2)
-                assert a.get_account_info() is None
+                with pytest.raises(BrokerUnavailableError):
+                    a.get_account_info()
             finally:
                 client.close()
         finally:
@@ -132,18 +135,24 @@ class TestTcpSymbolDiscovery:
         adapter.connect()
         client = _connect_client(adapter._port)
         try:
+            _send_message(client, "account_info", _ACCOUNT_DATA)
             _send_message(client, "symbol_list", {
-                "symbols": ["EURUSD_", "GBPJPY", "XAUUSD"],
+                "symbols": [
+                    {"name": "EURUSD_", "trading_permitted": True},
+                    {"name": "GBPJPY", "trading_permitted": True},
+                    {"name": "XAUUSD", "trading_permitted": True},
+                ],
             })
             time.sleep(0.1)
             syms = adapter.discover_symbols()
-            assert set(syms) == {"EURUSD_", "GBPJPY", "XAUUSD"}
+            assert {symbol.broker_name for symbol in syms} == {"EURUSD_", "GBPJPY", "XAUUSD"}
         finally:
             client.close()
 
     def test_empty_when_no_data(self, adapter):
         adapter.connect()
-        assert adapter.discover_symbols() == []
+        with pytest.raises(BrokerUnavailableError):
+            adapter.discover_symbols()
 
 
 class TestTcpContractSpec:
@@ -151,6 +160,7 @@ class TestTcpContractSpec:
         adapter.connect()
         client = _connect_client(adapter._port)
         try:
+            _send_message(client, "account_info", _ACCOUNT_DATA)
             _send_message(client, "contract_spec", {
                 "broker_symbol": "EURUSD_",
                 "digits": 5,
@@ -163,6 +173,10 @@ class TestTcpContractSpec:
                 "volume_step": "0.01",
                 "min_stop_distance": "0",
                 "trade_allowed": True,
+                "margin_initial": "1000",
+                "commission_per_lot": "0",
+                "swap_long": "0",
+                "swap_short": "0",
             })
             time.sleep(0.1)
             spec = adapter.get_contract_spec("EURUSD_")
@@ -172,9 +186,16 @@ class TestTcpContractSpec:
         finally:
             client.close()
 
-    def test_unknown_symbol_returns_none(self, adapter):
+    def test_unknown_symbol_reports_unavailable(self, adapter):
         adapter.connect()
-        assert adapter.get_contract_spec("UNKNOWN") is None
+        client = _connect_client(adapter._port)
+        try:
+            _send_message(client, "account_info", _ACCOUNT_DATA)
+            time.sleep(0.1)
+            with pytest.raises(SymbolUnavailableError, match="symbol unavailable"):
+                adapter.get_contract_spec("UNKNOWN")
+        finally:
+            client.close()
 
     def test_malformed_contract_spec_no_heartbeat(self, adapter):
         """Malformed contract_spec must not refresh heartbeat health."""
@@ -183,7 +204,8 @@ class TestTcpContractSpec:
         try:
             _send_message(client, "contract_spec", {"bad": "data"})
             time.sleep(0.1)
-            assert adapter.get_contract_spec("anything") is None
+            with pytest.raises(BrokerUnavailableError):
+                adapter.get_contract_spec("anything")
             assert adapter.health_check() is ConnectionStatus.DISCONNECTED
         finally:
             client.close()
@@ -201,12 +223,13 @@ class TestMalformedRecognizedTypes:
             try:
                 _send_message(client, "heartbeat", {})
                 time.sleep(0.05)
-                assert a.health_check() is ConnectionStatus.CONNECTED
+                assert a.health_check() is ConnectionStatus.RECONNECTING
                 time.sleep(0.3)
                 _send_message(client, "account_info", {"bad": "fields"})
                 time.sleep(0.1)
                 assert a.health_check() is ConnectionStatus.DISCONNECTED
-                assert a.get_account_info() is None
+                with pytest.raises(BrokerUnavailableError):
+                    a.get_account_info()
             finally:
                 client.close()
         finally:
@@ -221,7 +244,7 @@ class TestMalformedRecognizedTypes:
             try:
                 _send_message(client, "heartbeat", {})
                 time.sleep(0.05)
-                assert a.health_check() is ConnectionStatus.CONNECTED
+                assert a.health_check() is ConnectionStatus.RECONNECTING
                 time.sleep(0.3)
                 _send_message(client, "symbol_list", {"symbols": "not_a_list"})
                 time.sleep(0.1)
@@ -240,7 +263,7 @@ class TestMalformedRecognizedTypes:
             try:
                 _send_message(client, "heartbeat", {})
                 time.sleep(0.05)
-                assert a.health_check() is ConnectionStatus.CONNECTED
+                assert a.health_check() is ConnectionStatus.RECONNECTING
                 time.sleep(0.3)
                 _send_message(client, "contract_spec", {"broker_symbol": "X"})
                 time.sleep(0.1)
@@ -260,7 +283,7 @@ class TestMalformedRecognizedTypes:
             try:
                 _send_message(client, "heartbeat", {})
                 time.sleep(0.05)
-                assert a.health_check() is ConnectionStatus.CONNECTED
+                assert a.health_check() is ConnectionStatus.RECONNECTING
                 time.sleep(0.3)
                 _send_raw_json(client, {"type": "heartbeat"})
                 time.sleep(0.1)
@@ -280,7 +303,7 @@ class TestMalformedRecognizedTypes:
             try:
                 _send_message(client, "heartbeat", {})
                 time.sleep(0.05)
-                assert a.health_check() is ConnectionStatus.CONNECTED
+                assert a.health_check() is ConnectionStatus.RECONNECTING
                 time.sleep(0.3)
                 _send_raw_json(client, {"type": "heartbeat", "data": "not_a_dict"})
                 time.sleep(0.1)
@@ -298,7 +321,7 @@ class TestMalformedRecognizedTypes:
             _send_message(client, "account_info", {"bad": True})
             _send_message(client, "heartbeat", {})
             time.sleep(0.15)
-            assert adapter.health_check() is ConnectionStatus.CONNECTED
+            assert adapter.health_check() is ConnectionStatus.RECONNECTING
         finally:
             client.close()
 
@@ -310,7 +333,7 @@ class TestTcpReconnect:
         try:
             _send_message(client1, "heartbeat", {})
             time.sleep(0.1)
-            assert adapter.health_check() is ConnectionStatus.CONNECTED
+            assert adapter.health_check() is ConnectionStatus.RECONNECTING
         finally:
             client1.close()
 
@@ -319,9 +342,33 @@ class TestTcpReconnect:
         try:
             _send_message(client2, "heartbeat", {})
             time.sleep(0.1)
-            assert adapter.health_check() is ConnectionStatus.CONNECTED
+            assert adapter.health_check() is ConnectionStatus.RECONNECTING
         finally:
             client2.close()
+
+    def test_reconnect_blocks_operations_until_fresh_account_info(self, adapter):
+        adapter.connect()
+        first = _connect_client(adapter._port)
+        _send_message(first, "account_info", _ACCOUNT_DATA)
+        time.sleep(0.1)
+        assert adapter.get_account_info() is not None
+        first.close()
+        time.sleep(0.1)
+
+        second = _connect_client(adapter._port)
+        try:
+            _send_message(second, "heartbeat", {})
+            time.sleep(0.1)
+            assert adapter.health_check() is ConnectionStatus.RECONNECTING
+            with pytest.raises(BrokerUnavailableError):
+                adapter.get_account_info()
+
+            _send_message(second, "account_info", _ACCOUNT_DATA)
+            time.sleep(0.1)
+            assert adapter.health_check() is ConnectionStatus.CONNECTED
+            assert adapter.get_account_info() is not None
+        finally:
+            second.close()
 
 
 class TestTcpHeartbeatTimeout:
@@ -334,7 +381,7 @@ class TestTcpHeartbeatTimeout:
             try:
                 _send_message(client, "heartbeat", {})
                 time.sleep(0.05)
-                assert a.health_check() is ConnectionStatus.CONNECTED
+                assert a.health_check() is ConnectionStatus.RECONNECTING
                 time.sleep(0.3)
                 assert a.health_check() is ConnectionStatus.DISCONNECTED
             finally:
@@ -366,6 +413,24 @@ class TestTcpSendRequest:
         adapter.connect()
         ok = adapter.send_request("get_symbols")
         assert ok is False
+
+    def test_named_discovery_requests_match_ea_contract(self, adapter):
+        adapter.connect()
+        client = _connect_client(adapter._port)
+        try:
+            _send_message(client, "heartbeat", {})
+            time.sleep(0.1)
+            assert adapter.request_symbols()
+            assert recv_message(client) == {
+                "type": "request", "data": {"request": "get_symbols"},
+            }
+            assert adapter.request_contract_spec("EURUSD_")
+            assert recv_message(client) == {
+                "type": "request",
+                "data": {"request": "get_contracts", "symbol": "EURUSD_"},
+            }
+        finally:
+            client.close()
 
 
 class TestTcpMessageHardening:
@@ -411,7 +476,7 @@ class TestTcpMessageHardening:
             try:
                 _send_message(client, "heartbeat", {})
                 time.sleep(0.05)
-                assert a.health_check() is ConnectionStatus.CONNECTED
+                assert a.health_check() is ConnectionStatus.RECONNECTING
                 time.sleep(0.25)
                 _send_raw_json(client, {"type": "unknown_type", "data": {}})
                 time.sleep(0.1)
@@ -441,7 +506,7 @@ class TestTcpMessageHardening:
             _send_raw_json(client, {"type": "unknown"})
             _send_message(client, "heartbeat", {})
             time.sleep(0.15)
-            assert adapter.health_check() is ConnectionStatus.CONNECTED
+            assert adapter.health_check() is ConnectionStatus.RECONNECTING
         finally:
             client.close()
 
@@ -489,14 +554,19 @@ class TestProtocolConformance:
         client = _connect_client(adapter._port)
         try:
             raw = (
+                b'{"type":"account_info","data":{"login":1,"server":"s",'
+                b'"currency":"USD","balance":"100","equity":"100","margin_free":"0"}}'
+            )
+            _send_raw_bytes(client, raw)
+            raw = (
                 b'{"type":"contract_spec","data":'
                 b'{"broker_symbol":"EURUSD","digits":5,'
                 b'"point":"1e-05","tick_size":"1e-05","tick_value":"1",'
                 b'"contract_size":"100000",'
                 b'"volume_min":"0.01","volume_max":"500","volume_step":"0.01",'
                 b'"min_stop_distance":"0","trade_allowed":true,'
-                b'"margin_initial":null,'
-                b'"commission_per_lot":null,"swap_long":"-7.2","swap_short":"3.1"}}'
+                b'"margin_initial":"1000",'
+                b'"commission_per_lot":"0","swap_long":"-7.2","swap_short":"3.1"}}'
             )
             _send_raw_bytes(client, raw)
             time.sleep(0.1)
@@ -505,8 +575,8 @@ class TestProtocolConformance:
             assert spec.point == Decimal("0.00001")
             assert spec.tick_size == Decimal("0.00001")
             assert spec.contract_size == Decimal("100000")
-            assert spec.margin_initial is None
-            assert spec.commission_per_lot is None
+            assert spec.margin_initial == Decimal("1000")
+            assert spec.commission_per_lot == Decimal("0")
             assert spec.swap_long == Decimal("-7.2")
             assert spec.swap_short == Decimal("3.1")
         finally:
@@ -517,6 +587,7 @@ class TestProtocolConformance:
         adapter.connect()
         client = _connect_client(adapter._port)
         try:
+            _send_message(client, "account_info", _ACCOUNT_DATA)
             raw = (
                 b'{"type":"contract_spec","data":'
                 b'{"broker_symbol":"USDJPY","digits":3,'
@@ -525,7 +596,7 @@ class TestProtocolConformance:
                 b'"volume_min":"0.01","volume_max":"100","volume_step":"0.01",'
                 b'"min_stop_distance":"0","trade_allowed":true,'
                 b'"margin_initial":"1000",'
-                b'"commission_per_lot":null,"swap_long":"5.3","swap_short":"-8.1"}}'
+                b'"commission_per_lot":"0","swap_long":"5.3","swap_short":"-8.1"}}'
             )
             _send_raw_bytes(client, raw)
             time.sleep(0.1)
@@ -540,16 +611,21 @@ class TestProtocolConformance:
         adapter.connect()
         client = _connect_client(adapter._port)
         try:
+            _send_message(client, "account_info", _ACCOUNT_DATA)
             raw = (
                 b'{"type":"symbol_list","data":'
-                b'{"symbols":["EURUSD","GBPJPY","USDJPY","XAUUSD"]}}'
+                b'{"symbols":[{"name":"EURUSD","trading_permitted":true},'
+                b'{"name":"GBPJPY","trading_permitted":true},'
+                b'{"name":"USDJPY","trading_permitted":true},'
+                b'{"name":"XAUUSD","trading_permitted":false}]}}'
             )
             _send_raw_bytes(client, raw)
             time.sleep(0.1)
             syms = adapter.discover_symbols()
             assert len(syms) == 4
-            assert "EURUSD" in syms
-            assert "XAUUSD" in syms
+            assert "EURUSD" in {symbol.broker_name for symbol in syms}
+            assert "XAUUSD" in {symbol.broker_name for symbol in syms}
+            assert next(s for s in syms if s.broker_name == "XAUUSD").trading_permitted is False
         finally:
             client.close()
 
@@ -561,7 +637,7 @@ class TestProtocolConformance:
             raw = b'{"type":"heartbeat","data":{}}'
             _send_raw_bytes(client, raw)
             time.sleep(0.1)
-            assert adapter.health_check() is ConnectionStatus.CONNECTED
+            assert adapter.health_check() is ConnectionStatus.RECONNECTING
         finally:
             client.close()
 
@@ -613,7 +689,7 @@ class TestProtocolConformance:
             raw = (
                 b'{"type":"account_info","data":'
                 b'{"login":5000000000,"server":"s","currency":"USD",'
-                b'"balance":"0","equity":"0","margin_free":"0",'
+                b'"balance":"1","equity":"1","margin_free":"0",'
                 b'"account_type":"demo","leverage":100,"company":"c"}}'
             )
             _send_raw_bytes(client, raw)
@@ -632,7 +708,7 @@ class TestProtocolConformance:
             raw = (
                 b'{"type":"account_info","data":'
                 b'{"login":1,"server":"test\\u0001srv","currency":"USD",'
-                b'"balance":"0","equity":"0","margin_free":"0",'
+                b'"balance":"1","equity":"1","margin_free":"0",'
                 b'"account_type":"demo","leverage":1,"company":"co\\u001f"}}'
             )
             _send_raw_bytes(client, raw)
@@ -776,7 +852,7 @@ class TestTickBatchDedup:
 
 _ACCOUNT_DATA = {
     "login": 1, "server": "s", "currency": "USD",
-    "balance": "0", "equity": "0", "margin_free": "0",
+    "balance": "100", "equity": "100", "margin_free": "0",
     "account_type": "demo", "leverage": 1, "company": "c",
 }
 
@@ -786,7 +862,11 @@ _CONTRACT_DATA = {
     "contract_size": "100000",
     "volume_min": "0.01", "volume_max": "100", "volume_step": "0.01",
     "min_stop_distance": "0", "trade_allowed": True,
+    "margin_initial": "1000", "commission_per_lot": "0",
+    "swap_long": "0", "swap_short": "0",
 }
+
+_SYMBOLS = [{"name": "EURUSD", "trading_permitted": True}]
 
 
 class TestTimingPolicy:
@@ -806,22 +886,22 @@ class TestTimingPolicy:
             client = _connect_client(port)
             try:
                 _send_message(client, "account_info", _ACCOUNT_DATA)
-                _send_message(client, "symbol_list", {"symbols": ["EURUSD"]})
+                _send_message(client, "symbol_list", {"symbols": _SYMBOLS})
                 _send_message(client, "contract_spec", _CONTRACT_DATA)
                 _send_message(client, "heartbeat", {})
                 time.sleep(0.1)
                 assert a.get_account_info() is not None
-                assert a.discover_symbols() == ["EURUSD"]
+                assert a.discover_symbols()[0].broker_name == "EURUSD"
                 assert a.get_contract_spec("EURUSD") is not None
 
                 time.sleep(0.25)
                 _send_message(client, "account_info", _ACCOUNT_DATA)
-                _send_message(client, "symbol_list", {"symbols": ["EURUSD"]})
+                _send_message(client, "symbol_list", {"symbols": _SYMBOLS})
                 _send_message(client, "contract_spec", _CONTRACT_DATA)
                 _send_message(client, "heartbeat", {})
                 time.sleep(0.1)
                 assert a.get_account_info() is not None
-                assert a.discover_symbols() == ["EURUSD"]
+                assert a.discover_symbols()[0].broker_name == "EURUSD"
                 assert a.get_contract_spec("EURUSD") is not None
             finally:
                 client.close()
@@ -837,12 +917,12 @@ class TestTimingPolicy:
             client = _connect_client(port)
             try:
                 _send_message(client, "account_info", _ACCOUNT_DATA)
-                _send_message(client, "symbol_list", {"symbols": ["EURUSD"]})
+                _send_message(client, "symbol_list", {"symbols": _SYMBOLS})
                 _send_message(client, "contract_spec", _CONTRACT_DATA)
                 _send_message(client, "heartbeat", {})
                 time.sleep(0.1)
                 assert a.get_account_info() is not None
-                assert a.discover_symbols() == ["EURUSD"]
+                assert a.discover_symbols()[0].broker_name == "EURUSD"
                 assert a.get_contract_spec("EURUSD") is not None
 
                 # Keep heartbeat alive but let data go stale
@@ -850,9 +930,12 @@ class TestTimingPolicy:
                 _send_message(client, "heartbeat", {})
                 time.sleep(0.1)
                 assert a.health_check() is ConnectionStatus.CONNECTED
-                assert a.get_account_info() is None
-                assert a.discover_symbols() == []
-                assert a.get_contract_spec("EURUSD") is None
+                with pytest.raises(BrokerUnavailableError):
+                    a.get_account_info()
+                with pytest.raises(BrokerUnavailableError):
+                    a.discover_symbols()
+                with pytest.raises(BrokerUnavailableError):
+                    a.get_contract_spec("EURUSD")
             finally:
                 client.close()
         finally:
@@ -867,7 +950,7 @@ class TestTimingPolicy:
             client1 = _connect_client(port)
             try:
                 _send_message(client1, "account_info", _ACCOUNT_DATA)
-                _send_message(client1, "symbol_list", {"symbols": ["EURUSD"]})
+                _send_message(client1, "symbol_list", {"symbols": _SYMBOLS})
                 _send_message(client1, "contract_spec", _CONTRACT_DATA)
                 _send_message(client1, "heartbeat", {})
                 time.sleep(0.1)
@@ -881,7 +964,7 @@ class TestTimingPolicy:
             client2 = _connect_client(port)
             try:
                 _send_message(client2, "account_info", _ACCOUNT_DATA)
-                _send_message(client2, "symbol_list", {"symbols": ["GBPJPY"]})
+                _send_message(client2, "symbol_list", {"symbols": [{"name": "GBPJPY", "trading_permitted": True}]})
                 _send_message(client2, "contract_spec", {
                     **_CONTRACT_DATA, "broker_symbol": "GBPJPY",
                 })
@@ -889,7 +972,7 @@ class TestTimingPolicy:
                 time.sleep(0.1)
                 assert a.health_check() is ConnectionStatus.CONNECTED
                 assert a.get_account_info() is not None
-                assert "GBPJPY" in a.discover_symbols()
+                assert "GBPJPY" in {symbol.broker_name for symbol in a.discover_symbols()}
                 assert a.get_contract_spec("GBPJPY") is not None
             finally:
                 client2.close()

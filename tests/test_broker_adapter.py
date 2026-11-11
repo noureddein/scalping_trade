@@ -11,6 +11,8 @@ import pytest
 
 from scalping_core.broker_adapter import (
     BrokerAdapter,
+    BrokerUnavailableError,
+    SymbolUnavailableError,
     _infer_canonical,
     _is_forex_canonical,
     discover_canonical_mappings,
@@ -177,7 +179,8 @@ class TestFakeAdapterAccount:
     def test_account_when_disconnected(self):
         acct = make_demo_account()
         adapter = FakeBrokerAdapter(account=acct)
-        assert adapter.get_account_info() is None
+        with pytest.raises(BrokerUnavailableError):
+            adapter.get_account_info()
 
 
 class TestFakeAdapterSymbols:
@@ -186,12 +189,14 @@ class TestFakeAdapterSymbols:
         adapter = FakeBrokerAdapter(symbols=specs)
         adapter.connect()
         syms = adapter.discover_symbols()
-        assert set(syms) == {"EURUSD_", "GBPJPY"}
+        assert {symbol.broker_name for symbol in syms} == {"EURUSD_", "GBPJPY"}
+        assert all(symbol.trading_permitted for symbol in syms)
 
     def test_discover_symbols_disconnected(self):
         specs = {"EURUSD_": make_contract("EURUSD_")}
         adapter = FakeBrokerAdapter(symbols=specs)
-        assert adapter.discover_symbols() == []
+        with pytest.raises(BrokerUnavailableError):
+            adapter.discover_symbols()
 
     def test_get_contract_spec(self):
         spec = make_contract("EURUSD_", digits=5, point="0.00001")
@@ -205,7 +210,8 @@ class TestFakeAdapterSymbols:
     def test_get_contract_spec_unknown(self):
         adapter = FakeBrokerAdapter(symbols={"EURUSD_": make_contract("EURUSD_")})
         adapter.connect()
-        assert adapter.get_contract_spec("XYZABC") is None
+        with pytest.raises(SymbolUnavailableError, match="symbol unavailable"):
+            adapter.get_contract_spec("XYZABC")
 
 
 # ---------------------------------------------------------------------------
@@ -281,8 +287,8 @@ class TestDiscoverCanonicalMappings:
     def test_disconnected_returns_empty(self):
         adapter = FakeBrokerAdapter(symbols={"EURUSD": make_contract("EURUSD")})
         # not connected
-        mappings = discover_canonical_mappings(adapter)
-        assert mappings == []
+        with pytest.raises(BrokerUnavailableError):
+            discover_canonical_mappings(adapter)
 
     def test_mapping_carries_contract(self):
         spec = make_contract("USDJPY", digits=3, point="0.001")
@@ -320,7 +326,7 @@ class TestContractSpec:
         assert spec.broker_symbol == "EURUSD"
         assert spec.volume_min == Decimal("0.01")
         assert spec.trade_allowed is True
-        assert spec.margin_initial is None
+        assert spec.margin_initial == Decimal("1000")
 
 
 class TestAccountInfo:
