@@ -176,3 +176,15 @@ layer confirms no side effects.
 **Note**: Phase 4 is entirely testable with synthetic data and pytest.
 No live MT5 connection required. Live-feed strategy validation requires
 Phase 7 replay infrastructure and approved parameters.
+
+## Implementation Evidence (2026-11-11)
+
+**PASS** — `python3.12 -m pytest tests/test_strategy_engine.py tests/test_momentum.py tests/test_breakout.py tests/test_meanrev.py -q`
+completed with 38 passed. This covers synthetic regime priority/determinism,
+fail-closed setup, no-look-ahead feature snapshots, strategy behavior, and a
+full breakout recommendation path. No live broker was used.
+
+The full repository command `python3.12 -m pytest -q` was started but did not
+complete within 2.5 minutes; it stopped producing progress at 14%. Treat the
+full-suite result as **inconclusive**, not a pass. No profitability or execution
+claims are made by these diagnostics.
