@@ -118,10 +118,10 @@ non-default values from the broker.
 **Acceptance Scenarios**:
 
 1. **Given** a mapped symbol, **When** the backend requests its
-   contract specification, **Then** it receives all 13 required fields
+   contract specification, **Then** it receives all 15 required fields
    (digits, point, tick size, tick value, contract size, volume
    min/max/step, minimum stop distance, trading permissions, margin
-   requirements, commission, swap).
+   requirement, commission, swap long, swap short).
 2. **Given** a contract specification, **When** the broker updates a
    field (e.g., margin requirement), **Then** the system detects the
    change on the next refresh.
@@ -191,8 +191,8 @@ restored.
 - **FR-006**: The owner MUST be able to confirm or modify symbol
   mappings.
 - **FR-007**: The system MUST retrieve and store contract
-  specifications for each mapped symbol, covering all 13 required
-  fields defined in §5.2.
+  specifications for each mapped symbol, covering all 15 required
+  fields (13 from §5.2 plus swap_long and swap_short).
 - **FR-008**: The system MUST mark a symbol as ineligible for trading
   if its contract data is incomplete or unparseable — no defaults.
 - **FR-009**: The system MUST block all new trading operations when
@@ -218,7 +218,7 @@ restored.
 - **Symbol Mapping**: The association between a canonical symbol and
   its broker-specific name for a given broker/account.
 - **Contract Specification**: The broker's trading contract details
-  for a symbol (13 fields per §5.2).
+  for a symbol (15 fields: 13 per §5.2 plus swap_long, swap_short).
 
 ## Success Criteria
 
@@ -230,7 +230,7 @@ restored.
   seconds; reconnection succeeds automatically when the EA restarts.
 - **SC-003**: Symbol discovery returns the complete list of broker
   symbols and their trading permissions in a single round-trip.
-- **SC-004**: All 13 contract specification fields are populated from
+- **SC-004**: All 15 contract specification fields are populated from
   the broker for every mapped symbol; zero fields use default or
   assumed values.
 - **SC-005**: The system correctly blocks broker-dependent operations

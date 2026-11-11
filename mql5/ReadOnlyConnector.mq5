@@ -453,12 +453,16 @@ void SendAccountInfo()
 //+------------------------------------------------------------------+
 void SendSymbolList()
   {
-   int total = SymbolsTotal(true);  // only symbols in Market Watch
+   int total = SymbolsTotal(false);  // all symbols available from the broker
    string symbols = "[";
    for(int i = 0; i < total; i++)
      {
       if(i > 0) symbols += ",";
-      symbols += "\"" + JsonEscape(SymbolName(i, true)) + "\"";
+      string symbol = SymbolName(i, false);
+      long tradeMode = SymbolInfoInteger(symbol, SYMBOL_TRADE_MODE);
+      string permitted = tradeMode == SYMBOL_TRADE_MODE_DISABLED ? "false" : "true";
+      symbols += StringFormat("{\"name\":\"%s\",\"trading_permitted\":%s}",
+                              JsonEscape(symbol), permitted);
      }
    symbols += "]";
 
@@ -468,6 +472,36 @@ void SendSymbolList()
       Print("ReadOnlyConnector: symbol_list send failed, disconnecting");
       DisconnectFromBackend();
      }
+  }
+
+string TradePermissionsName(const ENUM_SYMBOL_TRADE_MODE mode)
+  {
+   switch(mode)
+     {
+      case SYMBOL_TRADE_MODE_FULL:      return "FULL";
+      case SYMBOL_TRADE_MODE_LONGONLY:  return "LONGONLY";
+      case SYMBOL_TRADE_MODE_SHORTONLY: return "SHORTONLY";
+      case SYMBOL_TRADE_MODE_CLOSEONLY: return "CLOSEONLY";
+      default:                          return "DISABLED";
+     }
+  }
+
+bool GetCommissionPerLot(const string symbol, double &commission)
+  {
+   MqlCommission rules[];
+   int count = SymbolInfoCommissions(symbol, rules);
+   if(count < 0)
+      return false;
+
+   // Zero returned rules means the symbol has no commission schedule.
+   // Tiered schedules cannot be represented faithfully by this single
+   // per-lot field, so leave it unknown and let Python fail closed.
+   if(count == 0)
+     {
+      commission = 0.0;
+      return true;
+     }
+   return false;
   }
 
 //+------------------------------------------------------------------+
@@ -483,17 +517,22 @@ void SendContractSpec(string symbol)
    // with commission_per_lot (Python parser treats null as None).
    string marginInit = (si.MarginInitial() != 0.0)
       ? StringFormat("\"%.10g\"", si.MarginInitial()) : "null";
+   double commissionValue = 0.0;
+   bool commissionKnown = GetCommissionPerLot(symbol, commissionValue);
+   string commission = commissionKnown
+      ? StringFormat("\"%.10g\"", commissionValue) : "null";
    string swapLong   = "\"" + StringFormat("%.10g", si.SwapLong()) + "\"";
    string swapShort  = "\"" + StringFormat("%.10g", si.SwapShort()) + "\"";
 
+   string permissions = TradePermissionsName(si.TradeMode());
    string data = StringFormat(
       "{\"broker_symbol\":\"%s\",\"digits\":%d,"
       "\"point\":\"%.10g\",\"tick_size\":\"%.10g\",\"tick_value\":\"%.10g\","
       "\"contract_size\":\"%.10g\","
       "\"volume_min\":\"%.10g\",\"volume_max\":\"%.10g\",\"volume_step\":\"%.10g\","
-      "\"min_stop_distance\":\"%.10g\",\"trade_allowed\":%s,"
+      "\"min_stop_distance\":\"%.10g\",\"trading_permissions\":\"%s\","
       "\"margin_initial\":%s,"
-      "\"commission_per_lot\":null,\"swap_long\":%s,\"swap_short\":%s}",
+      "\"commission_per_lot\":%s,\"swap_long\":%s,\"swap_short\":%s}",
       JsonEscape(symbol),
       si.Digits(),
       si.Point(),
@@ -503,9 +542,10 @@ void SendContractSpec(string symbol)
       si.LotsMin(),
       si.LotsMax(),
       si.LotsStep(),
-      (double)si.StopsLevel() * si.Point(),
-      si.TradeMode() != SYMBOL_TRADE_MODE_DISABLED ? "true" : "false",
+      (double)si.StopsLevel(),
+      permissions,
       marginInit,
+      commission,
       swapLong,
       swapShort);
 
@@ -531,6 +571,19 @@ void SendAllContractSpecs()
 //| Read available bytes into g_recvBuf without blocking OnTimer.    |
 //| Processes complete frames; retains partial data for next tick.   |
 //+------------------------------------------------------------------+
+string ExtractRequestSymbol(const string json)
+  {
+   int key = StringFind(json, "\"symbol\"");
+   if(key < 0) return "";
+   int colon = StringFind(json, ":", key + 8);
+   if(colon < 0) return "";
+   int quote = StringFind(json, "\"", colon + 1);
+   if(quote < 0) return "";
+   int endQuote = StringFind(json, "\"", quote + 1);
+   if(endQuote <= quote + 1) return "";
+   return StringSubstr(json, quote + 1, endQuote - quote - 1);
+  }
+
 void ReadBackendRequests()
   {
    if(g_socket == INVALID_HANDLE)
@@ -592,7 +645,11 @@ void ReadBackendRequests()
       else if(StringFind(json, "\"get_account\"") >= 0)
          SendAccountInfo();
       else if(StringFind(json, "\"get_contracts\"") >= 0)
-         SendAllContractSpecs();
+        {
+         string requestedSymbol = ExtractRequestSymbol(json);
+         if(requestedSymbol == "") SendAllContractSpecs();
+         else SendContractSpec(requestedSymbol);
+        }
      }
   }
 

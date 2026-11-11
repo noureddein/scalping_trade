@@ -82,18 +82,51 @@ Response types (backend → EA, read-only phase):
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import struct
 import threading
 import time
 from collections.abc import Callable
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
-from .broker_adapter import BrokerAdapter
-from .broker_types import AccountInfo, ConnectionStatus, ContractSpec, Tick
+from .broker_adapter import BrokerAdapter, BrokerUnavailableError, SymbolUnavailableError, _is_forex_canonical
+from .broker_types import AccountInfo, BrokerSymbol, ConnectionStatus, ContractSpec, SymbolMapping, Tick
 
 _HEADER_SIZE = 4
 _MAX_MESSAGE_SIZE = 1024 * 1024  # 1 MiB
+_LOGGER = logging.getLogger(__name__)
+
+
+def send_message(sock: socket.socket, payload: dict) -> None:
+    """Send one bounded, length-prefixed UTF-8 JSON object."""
+    encoded = json.dumps(payload, allow_nan=False).encode("utf-8")
+    if not encoded or len(encoded) > _MAX_MESSAGE_SIZE:
+        raise ValueError("broker message size is outside the allowed range")
+    sock.sendall(struct.pack("!I", len(encoded)) + encoded)
+
+
+def recv_message(sock: socket.socket) -> dict:
+    """Read one complete framed JSON object, including across partial reads."""
+    header = _recv_exact(sock, _HEADER_SIZE)
+    size = struct.unpack("!I", header)[0]
+    if size == 0 or size > _MAX_MESSAGE_SIZE:
+        raise ValueError("broker message size is outside the allowed range")
+    payload = _recv_exact(sock, size)
+    decoded = json.loads(payload.decode("utf-8"))
+    if not isinstance(decoded, dict):
+        raise ValueError("broker message payload must be a JSON object")
+    return decoded
+
+
+def _recv_exact(sock: socket.socket, size: int) -> bytes:
+    chunks = bytearray()
+    while len(chunks) < size:
+        chunk = sock.recv(size - len(chunks))
+        if not chunk:
+            raise ConnectionError("broker socket closed during a framed message")
+        chunks.extend(chunk)
+    return bytes(chunks)
 
 
 class TcpBrokerAdapter(BrokerAdapter):
@@ -123,12 +156,14 @@ class TcpBrokerAdapter(BrokerAdapter):
         self._running = False
 
         self._last_message_time: float = 0.0
+        self._connection_state = ConnectionStatus.DISCONNECTED
         self._account_info: AccountInfo | None = None
         self._account_info_time: float = 0.0
-        self._symbols: list[str] = []
+        self._symbols: list[tuple[str, bool]] = []
         self._symbols_time: float = 0.0
         self._contracts: dict[str, ContractSpec] = {}
         self._contracts_time: dict[str, float] = {}
+        self._owner_mappings: dict[str, SymbolMapping] = {}
         # Keyed by (terminal_instance_id, ea_instance_id) stream tuple
         self._batch_dedup: dict[tuple[str, str], tuple[int, int]] = {}
         self._batch_gaps: dict[tuple[str, str], int] = {}
@@ -148,6 +183,7 @@ class TcpBrokerAdapter(BrokerAdapter):
                 sock.settimeout(1.0)
                 self._server_sock = sock
                 self._running = True
+                self._connection_state = ConnectionStatus.DISCONNECTED
                 self._receiver_thread = threading.Thread(
                     target=self._accept_loop, daemon=True,
                 )
@@ -159,6 +195,8 @@ class TcpBrokerAdapter(BrokerAdapter):
     def disconnect(self) -> None:
         with self._lock:
             self._running = False
+            self._connection_state = ConnectionStatus.DISCONNECTED
+            self._clear_session_data_locked()
             if self._client_sock is not None:
                 try:
                     self._client_sock.close()
@@ -178,39 +216,95 @@ class TcpBrokerAdapter(BrokerAdapter):
     def health_check(self) -> ConnectionStatus:
         with self._lock:
             if self._server_sock is None:
+                self._connection_state = ConnectionStatus.DISCONNECTED
                 return ConnectionStatus.DISCONNECTED
             if self._client_sock is None:
+                self._connection_state = ConnectionStatus.DISCONNECTED
                 return ConnectionStatus.DISCONNECTED
             elapsed = time.monotonic() - self._last_message_time
             if elapsed > self._heartbeat_timeout_s:
+                self._connection_state = ConnectionStatus.DISCONNECTED
                 return ConnectionStatus.DISCONNECTED
-            return ConnectionStatus.CONNECTED
+            if self._account_info is None or self._account_info_time == 0:
+                self._connection_state = ConnectionStatus.RECONNECTING
+                return ConnectionStatus.RECONNECTING
+            self._connection_state = ConnectionStatus.CONNECTED
+            return self._connection_state
 
     def get_account_info(self) -> AccountInfo | None:
         with self._lock:
+            self._require_ready_locked()
             if self._account_info is None:
-                return None
+                raise BrokerUnavailableError("fresh account information is unavailable")
             if time.monotonic() - self._account_info_time > self._data_staleness_s:
-                return None
+                raise BrokerUnavailableError("account information is stale")
             return self._account_info
 
-    def discover_symbols(self) -> list[str]:
+    def discover_symbols(self) -> list[BrokerSymbol]:
         with self._lock:
-            if not self._symbols:
-                return []
+            self._require_ready_locked()
             if time.monotonic() - self._symbols_time > self._data_staleness_s:
-                return []
-            return list(self._symbols)
+                raise BrokerUnavailableError("symbol list is stale or unavailable")
+            account_number = self._account_info.login if self._account_info else None
+            return [BrokerSymbol(name, permitted, account_number) for name, permitted in self._symbols]
 
     def get_contract_spec(self, broker_symbol: str) -> ContractSpec | None:
         with self._lock:
+            self._require_ready_locked()
             spec = self._contracts.get(broker_symbol)
             if spec is None:
-                return None
+                raise SymbolUnavailableError(f"symbol unavailable: {broker_symbol}")
             ts = self._contracts_time.get(broker_symbol, 0.0)
             if time.monotonic() - ts > self._data_staleness_s:
-                return None
+                raise BrokerUnavailableError(f"contract specification is stale: {broker_symbol}")
             return spec
+
+    def update_mapping(self, canonical_name: str, broker_name: str) -> SymbolMapping:
+        if not _is_forex_canonical(canonical_name):
+            raise ValueError(f"invalid canonical Forex symbol: {canonical_name}")
+        symbol = next(
+            (item for item in self.discover_symbols() if item.broker_name == broker_name),
+            None,
+        )
+        contract = self.get_contract_spec(broker_name)
+        if symbol is None or contract is None:
+            raise ValueError(f"broker symbol unavailable: {broker_name}")
+        with self._lock:
+            if any(
+                item.broker_symbol == broker_name and key != canonical_name
+                for key, item in self._owner_mappings.items()
+            ):
+                raise ValueError(f"broker symbol already mapped: {broker_name}")
+            mapping = SymbolMapping(canonical_name, broker_name, contract, True)
+            self._owner_mappings[canonical_name] = mapping
+            return mapping
+
+    def get_mapping(self, canonical_name: str) -> SymbolMapping | None:
+        with self._lock:
+            return self._owner_mappings.get(canonical_name)
+
+    def _require_ready_locked(self) -> None:
+        if self._server_sock is None or self._client_sock is None:
+            self._connection_state = ConnectionStatus.DISCONNECTED
+            raise BrokerUnavailableError("broker unavailable until fresh account data is received")
+        if time.monotonic() - self._last_message_time > self._heartbeat_timeout_s:
+            self._connection_state = ConnectionStatus.DISCONNECTED
+            raise BrokerUnavailableError("broker heartbeat is stale")
+        if self._account_info is None or self._account_info_time == 0:
+            self._connection_state = ConnectionStatus.RECONNECTING
+            raise BrokerUnavailableError("broker unavailable until fresh account data is received")
+        if time.monotonic() - self._account_info_time > self._data_staleness_s:
+            self._connection_state = ConnectionStatus.DISCONNECTED
+            raise BrokerUnavailableError("account information is stale")
+
+    def _clear_session_data_locked(self) -> None:
+        self._account_info = None
+        self._account_info_time = 0.0
+        self._symbols = []
+        self._symbols_time = 0.0
+        self._contracts.clear()
+        self._contracts_time.clear()
+        self._last_message_time = 0.0
 
     def get_batch_stats(self) -> dict[tuple[str, str], dict[str, int]]:
         """Per-stream batch dedup stats keyed by (terminal_instance_id, ea_instance_id)."""
@@ -242,11 +336,14 @@ class TcpBrokerAdapter(BrokerAdapter):
                 continue
             with self._lock:
                 if self._client_sock is not None:
+                    _LOGGER.warning("replacing existing EA connection with a new loopback client")
                     try:
                         self._client_sock.close()
                     except OSError:
                         pass
+                self._clear_session_data_locked()
                 self._client_sock = client
+                self._connection_state = ConnectionStatus.RECONNECTING
                 client.settimeout(1.0)
             self._read_loop(client)
 
@@ -256,6 +353,10 @@ class TcpBrokerAdapter(BrokerAdapter):
             try:
                 chunk = client.recv(4096)
             except socket.timeout:
+                with self._lock:
+                    timed_out = time.monotonic() - self._last_message_time > self._heartbeat_timeout_s
+                if timed_out:
+                    break
                 continue
             except OSError:
                 break
@@ -265,7 +366,16 @@ class TcpBrokerAdapter(BrokerAdapter):
             while len(buf) >= _HEADER_SIZE:
                 msg_len = struct.unpack("!I", buf[:_HEADER_SIZE])[0]
                 if msg_len > _MAX_MESSAGE_SIZE:
+                    _LOGGER.warning("closing broker connection with oversized frame: %d bytes", msg_len)
                     buf = b""
+                    try:
+                        client.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    try:
+                        client.close()
+                    except OSError:
+                        pass
                     break
                 if len(buf) < _HEADER_SIZE + msg_len:
                     break
@@ -275,6 +385,8 @@ class TcpBrokerAdapter(BrokerAdapter):
         with self._lock:
             if self._client_sock is client:
                 self._client_sock = None
+                self._connection_state = ConnectionStatus.DISCONNECTED
+                self._clear_session_data_locked()
         try:
             client.close()
         except OSError:
@@ -289,14 +401,18 @@ class TcpBrokerAdapter(BrokerAdapter):
         try:
             msg = json.loads(payload.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
+            _LOGGER.warning("discarding malformed broker message: invalid JSON or UTF-8")
             return
         if not isinstance(msg, dict):
+            _LOGGER.warning("discarding malformed broker message: expected a JSON object")
             return
         msg_type = msg.get("type")
         if msg_type not in self._KNOWN_TYPES:
+            _LOGGER.warning("discarding broker message with unknown type: %r", msg_type)
             return
         data = msg.get("data")
         if not isinstance(data, dict):
+            _LOGGER.warning("discarding malformed %s message: expected object data", msg_type)
             return
         now = time.monotonic()
         accepted = False
@@ -315,9 +431,9 @@ class TcpBrokerAdapter(BrokerAdapter):
                     accepted = True
 
             elif msg_type == "symbol_list":
-                syms = data.get("symbols")
-                if isinstance(syms, list):
-                    self._symbols = [str(s) for s in syms]
+                syms = _parse_symbols(data, self._account_info.login if self._account_info else None)
+                if syms is not None:
+                    self._symbols = [(item.broker_name, item.trading_permitted) for item in syms]
                     self._symbols_time = now
                     accepted = True
 
@@ -368,6 +484,8 @@ class TcpBrokerAdapter(BrokerAdapter):
 
             if accepted:
                 self._last_message_time = now
+                if msg_type == "account_info":
+                    self._connection_state = ConnectionStatus.CONNECTED
 
         if msg_type == "tick" and tick is not None and self._on_tick is not None:
             self._on_tick(tick)
@@ -377,35 +495,82 @@ class TcpBrokerAdapter(BrokerAdapter):
 
     def send_request(self, request_type: str, params: dict | None = None) -> bool:
         """Send a request message to the EA. Returns False if no client."""
-        msg = json.dumps({"type": "request", "data": {"request": request_type, **(params or {})}})
-        payload = msg.encode("utf-8")
-        frame = struct.pack("!I", len(payload)) + payload
+        msg = {"type": "request", "data": {"request": request_type, **(params or {})}}
         with self._lock:
             client = self._client_sock
         if client is None:
             return False
         try:
-            client.sendall(frame)
+            send_message(client, msg)
             return True
         except OSError:
             return False
 
+    def request_symbols(self) -> bool:
+        return self.send_request("get_symbols")
+
+    def request_contract_specs(self) -> bool:
+        """Request the EA's current contract snapshot for Market Watch symbols."""
+        return self.send_request("get_contracts")
+
+    def request_contract_spec(self, broker_symbol: str) -> bool:
+        if not broker_symbol or not isinstance(broker_symbol, str):
+            raise ValueError("broker_symbol must be a non-empty string")
+        return self.send_request("get_contracts", {"symbol": broker_symbol})
+
 
 def _parse_account_info(data: dict) -> AccountInfo | None:
     try:
+        login = data.get("account_number", data.get("login"))
+        server = data.get("broker_name", data.get("server"))
+        margin = data.get("margin", data.get("margin_free"))
+        balance = Decimal(str(data["balance"]))
+        equity = Decimal(str(data["equity"]))
+        margin_value = Decimal(str(margin))
+        currency = data["currency"]
+        if isinstance(login, bool) or not isinstance(login, int) or login <= 0:
+            return None
+        if not isinstance(server, str) or not server.strip():
+            return None
+        if not isinstance(currency, str) or len(currency) != 3 or not currency.isascii() or not currency.isalpha() or not currency.isupper():
+            return None
+        if not all(value.is_finite() for value in (balance, equity, margin_value)):
+            return None
+        if balance <= 0 or margin_value < 0:
+            return None
         return AccountInfo(
-            login=int(data["login"]),
-            server=str(data["server"]),
-            currency=str(data["currency"]),
-            balance=Decimal(str(data["balance"])),
-            equity=Decimal(str(data["equity"])),
-            margin_free=Decimal(str(data["margin_free"])),
+            login=login,
+            server=server.strip(),
+            currency=currency,
+            balance=balance,
+            equity=equity,
+            margin_free=margin_value,
             account_type=str(data.get("account_type", "demo")),
             leverage=int(data.get("leverage", 0)),
             company=str(data.get("company", "")),
         )
-    except (KeyError, ValueError, TypeError):
+    except (KeyError, ValueError, TypeError, InvalidOperation):
         return None
+
+
+def _parse_symbols(data: dict, account_number: int | None) -> list[BrokerSymbol] | None:
+    raw_symbols = data.get("symbols")
+    if not isinstance(raw_symbols, list):
+        return None
+    result: list[BrokerSymbol] = []
+    seen: set[str] = set()
+    for item in raw_symbols:
+        if not isinstance(item, dict):
+            return None
+        name = item.get("name")
+        permitted = item.get("trading_permitted")
+        if not isinstance(name, str) or not name.strip() or name in seen:
+            return None
+        if not isinstance(permitted, bool):
+            return None
+        seen.add(name)
+        result.append(BrokerSymbol(name, permitted, account_number))
+    return result
 
 
 def _parse_tick(data: dict, recv_mono: float) -> Tick | None:
@@ -421,7 +586,7 @@ def _parse_tick(data: dict, recv_mono: float) -> Tick | None:
             server_time_ms=int(data["server_time_ms"]),
             recv_time_mono=recv_mono,
         )
-    except (KeyError, ValueError, TypeError):
+    except (KeyError, ValueError, TypeError, InvalidOperation):
         return None
 
 
@@ -463,28 +628,66 @@ def _parse_tick_batch(data: dict, recv_mono: float) -> list[Tick] | None:
                 is_newest=(i == newest_index),
             ))
         return ticks
-    except (KeyError, ValueError, TypeError, IndexError):
+    except (KeyError, ValueError, TypeError, IndexError, InvalidOperation):
         return None
 
 
 def _parse_contract_spec(data: dict) -> ContractSpec | None:
     try:
+        digits = data["digits"]
+        permissions = data.get("trading_permissions")
+        if permissions is None:
+            permitted = data.get("trade_allowed")
+            if not isinstance(permitted, bool):
+                return None
+            permissions = "FULL" if permitted else "DISABLED"
+        if not isinstance(permissions, str) or not permissions.strip():
+            return None
+        if permissions not in {"FULL", "LONGONLY", "SHORTONLY", "CLOSEONLY", "DISABLED"}:
+            return None
+        if isinstance(digits, bool) or not isinstance(digits, int) or digits < 0:
+            return None
+        margin = Decimal(str(data["margin_requirement"] if "margin_requirement" in data else data["margin_initial"]))
+        commission_raw = data["commission_per_lot"] if "commission_per_lot" in data else data["commission"]
+        commission = Decimal(str(commission_raw))
+        swap_long = Decimal(str(data["swap_long"]))
+        swap_short = Decimal(str(data["swap_short"]))
+        point = Decimal(str(data["point"]))
+        tick_size = Decimal(str(data["tick_size"]))
+        tick_value = Decimal(str(data["tick_value"]))
+        contract_size = Decimal(str(data["contract_size"]))
+        volume_min = Decimal(str(data["volume_min"]))
+        volume_max = Decimal(str(data["volume_max"]))
+        volume_step = Decimal(str(data["volume_step"]))
+        stop_distance = Decimal(str(data.get("min_stop_distance", "0")))
+        positive = (margin, point, tick_size, tick_value, contract_size, volume_min, volume_max, volume_step)
+        if not all(value.is_finite() and value > 0 for value in positive):
+            return None
+        if not all(value.is_finite() for value in (commission, swap_long, swap_short, stop_distance)):
+            return None
+        if stop_distance < 0 or stop_distance != stop_distance.to_integral_value() or volume_max < volume_min:
+            return None
+        broker_symbol = data["broker_symbol"]
+        if not isinstance(broker_symbol, str) or not broker_symbol.strip():
+            return None
+        trade_allowed = permissions in {"FULL", "LONGONLY", "SHORTONLY"}
         return ContractSpec(
-            broker_symbol=str(data["broker_symbol"]),
-            digits=int(data["digits"]),
-            point=Decimal(str(data["point"])),
-            tick_size=Decimal(str(data["tick_size"])),
-            tick_value=Decimal(str(data["tick_value"])),
-            contract_size=Decimal(str(data["contract_size"])),
-            volume_min=Decimal(str(data["volume_min"])),
-            volume_max=Decimal(str(data["volume_max"])),
-            volume_step=Decimal(str(data["volume_step"])),
-            min_stop_distance=Decimal(str(data.get("min_stop_distance", "0"))),
-            trade_allowed=bool(data.get("trade_allowed", True)),
-            margin_initial=Decimal(str(data["margin_initial"])) if data.get("margin_initial") is not None else None,
-            commission_per_lot=Decimal(str(data["commission_per_lot"])) if data.get("commission_per_lot") is not None else None,
-            swap_long=Decimal(str(data["swap_long"])) if data.get("swap_long") is not None else None,
-            swap_short=Decimal(str(data["swap_short"])) if data.get("swap_short") is not None else None,
+            broker_symbol=broker_symbol.strip(),
+            digits=digits,
+            point=point,
+            tick_size=tick_size,
+            tick_value=tick_value,
+            contract_size=contract_size,
+            volume_min=volume_min,
+            volume_max=volume_max,
+            volume_step=volume_step,
+            min_stop_distance=stop_distance,
+            trade_allowed=trade_allowed,
+            margin_initial=margin,
+            commission_per_lot=commission,
+            swap_long=swap_long,
+            swap_short=swap_short,
+            trading_permissions=permissions,
         )
-    except (KeyError, ValueError, TypeError):
+    except (KeyError, ValueError, TypeError, InvalidOperation):
         return None

@@ -11,12 +11,16 @@
 
 ## Message Types (EA → Backend)
 
+Every EA message uses the common envelope
+`{"type":"<message_type>","data":{...}}`. The Python adapter accepts
+only the type names and field shapes described below.
+
 ### HEARTBEAT
 
 Sent periodically by the EA to signal liveness.
 
 ```json
-{"type": "heartbeat", "timestamp": "<broker_time_iso>"}
+{"type":"heartbeat","data":{}}
 ```
 
 ### ACCOUNT_INFO
@@ -26,51 +30,55 @@ Account details, sent on connection and periodically.
 ```json
 {
   "type": "account_info",
-  "account_number": 12345678,
-  "broker_name": "CFI",
-  "balance": 10000.00,
-  "equity": 10000.00,
-  "margin": 0.00,
-  "currency": "USD"
+  "data": {
+    "login": 12345678,
+    "server": "CFI",
+    "balance": "10000.00",
+    "equity": "10000.00",
+    "margin_free": "10000.00",
+    "currency": "USD"
+  }
 }
 ```
 
-### SYMBOLS
+### SYMBOL_LIST
 
 Full list of available symbols, sent on request or connection.
 
 ```json
 {
-  "type": "symbols",
-  "symbols": [
+  "type": "symbol_list",
+  "data": {"symbols": [
     {"name": "EURUSD", "trading_permitted": true},
     {"name": "GBPUSD", "trading_permitted": true}
-  ]
+  ]}
 }
 ```
 
 ### CONTRACT_SPEC
 
-Contract specification for a requested symbol.
+Contract specification for a broker symbol included in the discovery snapshot.
 
 ```json
 {
   "type": "contract_spec",
-  "symbol": "EURUSD",
-  "digits": 5,
-  "point": 0.00001,
-  "tick_size": 0.00001,
-  "tick_value": 1.0,
-  "contract_size": 100000.0,
-  "volume_min": 0.01,
-  "volume_max": 500.0,
-  "volume_step": 0.01,
-  "min_stop_distance": 0,
-  "trading_permissions": "FULL",
-  "margin_requirement": 1000.0,
-  "commission": 0.0,
-  "swap_long": -1.5,
-  "swap_short": 0.5
+  "data": {
+    "broker_symbol": "EURUSD",
+    "digits": 5,
+    "point": "0.00001",
+    "tick_size": "0.00001",
+    "tick_value": "1.0",
+    "contract_size": "100000.0",
+    "volume_min": "0.01",
+    "volume_max": "500.0",
+    "volume_step": "0.01",
+    "min_stop_distance": "0",
+    "trading_permissions": "FULL",
+    "margin_initial": "1000.0",
+    "commission_per_lot": "0.0",
+    "swap_long": "-1.5",
+    "swap_short": "0.5"
+  }
 }
 ```
 
@@ -81,15 +89,15 @@ Contract specification for a requested symbol.
 Request full symbol list.
 
 ```json
-{"type": "request_symbols"}
+{"type":"request","data":{"request":"get_symbols"}}
 ```
 
 ### REQUEST_CONTRACT_SPEC
 
-Request contract spec for a specific symbol.
+Request one contract spec, or omit `symbol` to refresh all available specs.
 
 ```json
-{"type": "request_contract_spec", "symbol": "EURUSD"}
+{"type":"request","data":{"request":"get_contracts","symbol":"EURUSD"}}
 ```
 
 ## Error Handling
@@ -104,7 +112,8 @@ Request contract spec for a specific symbol.
 
 ## Constraints
 
-- All numeric values use their natural JSON types (integer or float).
+- Integer values use JSON integers. Decimal-valued fields are serialized as
+  decimal strings to preserve their precision across the MQL5/Python boundary.
 - Timestamps use ISO 8601 format.
 - Symbol names are broker-specific strings, not canonical names.
 - This contract covers Phase 2 (read-only). Order-related messages
