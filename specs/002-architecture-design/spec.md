@@ -213,7 +213,7 @@ concrete and testable.
 - **SC-002**: Every domain section (§§5–14) passes a completeness
   review: it states requirements, entities, and constraints without
   gaps requiring implementer invention.
-- **SC-003**: §19 lists all 18 unresolved decisions with numbered
+- **SC-003**: §19 lists all unresolved decisions with numbered
   entries, descriptions, and sufficient context for owner resolution.
 - **SC-004**: A cross-reference audit finds zero dangling §19 references
   and zero contradictions between the master plan and the strategy
