@@ -154,3 +154,34 @@ verify the position is unaffected and only new entries are blocked.
 **Note**: Live-feed acceptance tests require native Windows MT5 with
 the EA connected to the WSL2 backend. These are owner-performed
 validation, not automated CI tests (Constitution Principle VIII).
+
+## Implementation Evidence — 2026-11-11
+
+- Market-data, spread, risk-gate, execution, admission, and strategy tests:
+  **193 passed**.
+- TCP broker adapter suite, including TICK_DATA and MARKET_STATUS parsing:
+  **53 passed** using local loopback sockets.
+- Full repository suite: **425 passed, 36 skipped, 16 failed**. The
+  failures are pre-existing in `test_operator_resolution.py::test_resolve_order_not_found`
+  and `tests/test_startup_supervisor.py` (test reconciler missing
+  `halt_entry_barrier()`); those files are outside Phase 3 scope.
+- Synthetic timing assertion passes; this is not live-feed performance
+  evidence.
+- The EA source now emits Phase 3 TICK_DATA. It was not compiled in
+  MetaEditor, and no live MT5 tick session was run. Owner validation is
+  still required for T021.
+
+
+| Quickstart scenario | Synthetic automated result | Owner live MT5 result |
+|---------------------|----------------------------|-----------------------|
+| Tick validation and timing | PASS | Pending |
+| Batch processing and deduplication | PASS | Pending |
+| Contract-aware spread calculation | PASS | Pending |
+| Rolling spread statistics | PASS | Not required |
+| Spread gate enforcement | PASS | Not required |
+| Stability recovery | PASS | Pending |
+| Stale data detection | PASS | Pending |
+| Existing position protection | PASS | Not required |
+
+These automated results use synthetic tests. T021 remains open until the
+owner completes the live MT5 checks.

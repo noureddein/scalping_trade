@@ -325,3 +325,9 @@ class TestConstants:
 
     def test_spread_stability_value(self):
         assert REQUIRED_SPREAD_STABILITY_SECONDS == Decimal("60")
+
+
+def test_unconfigured_spread_gate_is_denied():
+    decision = evaluate_entry(_ok_check(spread_gate_eligible=False))
+    assert not decision.approved
+    assert "spread_gate_unconfigured_or_market_unhealthy" in decision.reasons

@@ -83,6 +83,7 @@ class EntryCheck:
     has_pending_entry: bool
     estimated_loss_usd: Decimal | None
     loss_estimate_valid: bool
+    spread_gate_eligible: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +158,9 @@ def evaluate_entry(check: EntryCheck) -> EntryDecision:
 
     if not check.adaptive_spread_ok:
         reasons.append("adaptive_spread_limit_exceeded")
+
+    if not check.spread_gate_eligible:
+        reasons.append("spread_gate_unconfigured_or_market_unhealthy")
 
     if not _is_finite_decimal(check.stable_spread_seconds):
         reasons.append("spread_not_stable_for_required_60_seconds")

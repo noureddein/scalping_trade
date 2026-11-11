@@ -21,6 +21,7 @@ ticks in a single message (batching).
   "pair": "EURUSD",
   "run_counter": 1,
   "batch_sequence": 42,
+  "dropped_count": 0,
   "ticks": [
     {
       "bid": 1.08542,
@@ -42,6 +43,7 @@ ticks in a single message (batching).
 | pair | string | Yes | Broker symbol name (mapped to canonical via Phase 2) |
 | run_counter | integer | Yes | EA run identifier; increments on EA restart |
 | batch_sequence | integer | Yes | Monotonically increasing per run_counter |
+| dropped_count | integer | No | EA ring-buffer overwrites known for this batch; defaults to 0 |
 | ticks | array | Yes | One or more tick objects |
 | ticks[].bid | decimal | Yes | Bid price; positive, finite |
 | ticks[].ask | decimal | Yes | Ask price; positive, finite, >= bid |
@@ -58,6 +60,8 @@ ticks in a single message (batching).
    A gap marks the interval as degraded. A new `run_counter` resets
    sequence tracking.
 5. Local receipt time is recorded by the backend (not sent by EA).
+6. A positive `dropped_count` marks this batch interval degraded even
+   when the batch sequence itself is contiguous.
 
 **Rejection**: Invalid ticks are rejected individually within a batch.
 Valid ticks in the same batch are still processed. The backend does NOT

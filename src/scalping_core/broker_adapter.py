@@ -69,6 +69,10 @@ class BrokerAdapter(abc.ABC):
     def get_contract_spec(self, broker_symbol: str) -> ContractSpec | None:
         """Return a fresh spec or raise SymbolUnavailableError/BrokerUnavailableError."""
 
+    def get_contract_spec_updated_at(self, broker_symbol: str) -> float | None:
+        """Return monotonic receive time for a fresh contract spec, if known."""
+        return None
+
     def update_mapping(self, canonical_name: str, broker_name: str) -> SymbolMapping:
         """Owner-confirm a mapping for a currently discovered broker symbol."""
         raise NotImplementedError
