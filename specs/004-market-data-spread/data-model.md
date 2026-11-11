@@ -93,6 +93,9 @@ Per-pair market condition tracking.
 | stability_duration | Required stable period | Default 60 seconds |
 | is_recovering | In stability recovery period? | Boolean |
 | is_entry_blocked | Any condition blocks entries? | Boolean |
+| is_market_open | Latest EA market status, when supplied | Boolean or NULL |
+| reopened_unstable | Ticks have resumed after observed NONE activity | Boolean |
+| activity baseline | Observed tick rate over configured window | In-memory rolling observations |
 
 **State transitions for spread recovery**:
 - NORMAL → ABNORMAL: Spread gate violation detected
@@ -116,3 +119,8 @@ CanonicalSymbol 1──* SpreadSnapshot (rolling window)
   and SpreadStatistics may be persisted in later phases.
 - Tick validation happens once at ingestion; downstream consumers
   (spread engine, strategies) receive only VALID ticks.
+- Unapproved staleness, activity, rolling-window, trend, or anomaly
+  settings remain unconfigured and block entry eligibility.
+- Contract freshness is measured with the backend monotonic receive time;
+  a missing freshness bound or timestamp makes spread calculation fail
+  closed.

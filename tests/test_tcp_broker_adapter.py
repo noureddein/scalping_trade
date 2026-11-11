@@ -14,8 +14,12 @@ from decimal import Decimal
 import pytest
 
 from scalping_core.broker_adapter import BrokerUnavailableError, SymbolUnavailableError
-from scalping_core.broker_types import ConnectionStatus
-from scalping_core.tcp_broker_adapter import TcpBrokerAdapter, recv_message
+from scalping_core.broker_types import ConnectionStatus, SymbolMapping
+from scalping_core.fake_broker import make_contract
+from scalping_core.market_data import MarketDataProcessor
+from scalping_core.tcp_broker_adapter import (
+    TcpBrokerAdapter, _parse_market_status, _parse_tick_data, recv_message,
+)
 
 
 def _find_free_port() -> int:
@@ -45,6 +49,85 @@ def _connect_client(port: int, timeout: float = 2.0) -> socket.socket:
             s.close()
             time.sleep(0.05)
     raise TimeoutError(f"Could not connect to 127.0.0.1:{port}")
+
+
+def test_tick_data_parser_keeps_valid_ticks_and_rejects_bad_items():
+    parsed = _parse_tick_data({
+        "pair": "EURUSD.x", "run_counter": 3, "batch_sequence": 8,
+        "ticks": [
+            {"bid": "1.1", "ask": "1.1001", "broker_timestamp": "2026-11-11T10:00:00.123Z"},
+            {"bid": "NaN", "ask": "1.2", "broker_timestamp": "2026-11-11T10:00:01Z"},
+            {"bid": "1.2", "ask": "1.1", "broker_timestamp": "2026-11-11T10:00:02Z"},
+            {"bid": "1.1", "ask": "1.2", "broker_timestamp": "no-time"},
+        ],
+    }, 123.0)
+    assert parsed is not None
+    pair, run_counter, sequence, dropped, ticks = parsed
+    assert (pair, run_counter, sequence, dropped) == ("EURUSD.x", 3, 8, 0)
+    assert len(ticks) == 1
+    assert ticks[0].broker_timestamp.isoformat() == "2026-11-11T10:00:00.123000+00:00"
+    assert ticks[0].local_receipt_time == 123.0
+
+
+def test_market_status_parser_requires_aware_timestamp_and_boolean():
+    valid = _parse_market_status({"pair": "EURUSD", "is_market_open": True,
+                                  "server_time": "2026-11-11T10:00:00Z"})
+    assert valid is not None and valid[1] is True
+    assert _parse_market_status({"pair": "EURUSD", "is_market_open": 1,
+                                 "server_time": "2026-11-11T10:00:00Z"}) is None
+    assert _parse_market_status({"pair": "EURUSD", "is_market_open": True,
+                                 "server_time": "2026-11-11T10:00:00"}) is None
+
+
+def test_tick_data_message_maps_broker_symbol_and_forwards_batch_status():
+    batches = []
+    statuses = []
+    a = TcpBrokerAdapter(1, on_tick_batch=lambda *args: batches.append(args),
+                         on_market_status=lambda *args: statuses.append(args))
+    a._owner_mappings["EURUSD"] = SymbolMapping("EURUSD", "EURUSD.x", make_contract("EURUSD.x"), True)
+    tick_payload = json.dumps({"type": "TICK_DATA", "data": {
+        "pair": "EURUSD.x", "run_counter": 4, "batch_sequence": 0,
+        "ticks": [{"bid": "1.1", "ask": "1.1001", "broker_timestamp": "2026-11-11T10:00:00Z"}],
+    }}).encode()
+    a._handle_message(tick_payload)
+    status_payload = json.dumps({"type": "MARKET_STATUS", "data": {
+        "pair": "EURUSD.x", "is_market_open": True,
+        "server_time": "2026-11-11T10:00:00Z",
+    }}).encode()
+    a._handle_message(status_payload)
+    assert len(batches) == 1
+    assert batches[0][0:3] == ("EURUSD", 0, 4)
+    assert batches[0][3][0].pair == "EURUSD"
+    assert statuses[0][0:2] == ("EURUSD", True)
+
+
+def test_adapter_to_market_data_pipeline_only_delivers_valid_ticks():
+    delivered = []
+    processor = MarketDataProcessor(delivered.append)
+    processor.register_pair("EURUSD", "EURUSD.x", staleness_threshold_s=5,
+                            normal_min_ticks_per_second=0.1,
+                            low_min_ticks_per_second=0.01,
+                            none_after_s=30, baseline_window_s=10)
+    a = TcpBrokerAdapter(1, on_tick_batch=processor.consume_tick_batch,
+                         on_market_status=processor.consume_market_status)
+    a._owner_mappings["EURUSD"] = SymbolMapping("EURUSD", "EURUSD.x", make_contract("EURUSD.x"), True)
+    payload = json.dumps({"type": "TICK_DATA", "data": {
+        "pair": "EURUSD.x", "run_counter": 1, "batch_sequence": 0,
+        "ticks": [
+            {"bid": "1.1", "ask": "1.1001", "broker_timestamp": "2026-11-11T10:00:00Z"},
+            {"bid": "1.1", "ask": "1.1001", "broker_timestamp": "2026-11-11T10:00:00Z"},
+            {"bid": "1.2", "ask": "1.1", "broker_timestamp": "2026-11-11T10:00:01Z"},
+        ],
+    }}).encode()
+    a._handle_message(payload)
+    assert len(delivered) == 1
+    assert delivered[0].pair == "EURUSD"
+    status = json.dumps({"type": "MARKET_STATUS", "data": {
+        "pair": "EURUSD.x", "is_market_open": False,
+        "server_time": "2026-11-11T10:00:00Z",
+    }}).encode()
+    a._handle_message(status)
+    assert processor.health("EURUSD").is_entry_blocked
 
 
 @pytest.fixture

@@ -20,7 +20,7 @@ TCP protocol with TICK_DATA and MARKET_STATUS messages.
 
 **Purpose**: Tick and spread type definitions shared across all stories
 
-- [ ] T001 Add tick and spread types to src/scalping_core/broker_types.py: Tick dataclass (pair: str, bid: Decimal positive/finite, ask: Decimal positive/finite/>=bid, broker_timestamp: datetime advancing, local_receipt_time: datetime monotonic, batch_sequence: int non-negative, run_counter: int, validation_status: enum VALID/CROSSED/STALE/DUPLICATE/MALFORMED/REORDERED), TickBatch dataclass (pair: str, sequence_number: int monotonically increasing per run, run_counter: int, tick_count: int positive, has_gap: bool, is_run_boundary: bool), SpreadSnapshot dataclass (pair: str, spread_pips: Decimal non-negative, bid: Decimal, ask: Decimal, timestamp: datetime), SpreadTrend enum (WIDENING/NARROWING/STABLE), TickActivityLevel enum (NORMAL/LOW/NONE)
+- [X] T001 Add tick and spread types to src/scalping_core/broker_types.py: Tick dataclass (pair: str, bid: Decimal positive/finite, ask: Decimal positive/finite/>=bid, broker_timestamp: datetime advancing, local_receipt_time: datetime monotonic, batch_sequence: int non-negative, run_counter: int, validation_status: enum VALID/CROSSED/STALE/DUPLICATE/MALFORMED/REORDERED), TickBatch dataclass (pair: str, sequence_number: int monotonically increasing per run, run_counter: int, tick_count: int positive, has_gap: bool, is_run_boundary: bool), SpreadSnapshot dataclass (pair: str, spread_pips: Decimal non-negative, bid: Decimal, ask: Decimal, timestamp: datetime), SpreadTrend enum (WIDENING/NARROWING/STABLE), TickActivityLevel enum (NORMAL/LOW/NONE)
 
 ---
 
@@ -30,8 +30,8 @@ TCP protocol with TICK_DATA and MARKET_STATUS messages.
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete
 
-- [ ] T002 Extend src/scalping_core/tcp_broker_adapter.py to parse TICK_DATA messages per contracts/tick-protocol.md: extract pair (str, must map to canonical symbol via Phase 2), run_counter (int), batch_sequence (int), ticks array (each with bid: decimal positive/finite, ask: decimal positive/finite/>=bid, broker_timestamp: ISO 8601 advancing). Record local_receipt_time on the backend side. Reject entire message if JSON is malformed; reject individual ticks if fields are missing/invalid; pass valid ticks to market_data consumer
-- [ ] T003 Extend src/scalping_core/tcp_broker_adapter.py to parse optional MARKET_STATUS messages: pair (str), is_market_open (bool), server_time (ISO 8601). Forward to market_data consumer. Ignore unknown message types for forward compatibility
+- [X] T002 Extend src/scalping_core/tcp_broker_adapter.py to parse TICK_DATA messages per contracts/tick-protocol.md: extract pair (str, must map to canonical symbol via Phase 2), run_counter (int), batch_sequence (int), ticks array (each with bid: decimal positive/finite, ask: decimal positive/finite/>=bid, broker_timestamp: ISO 8601 advancing). Record local_receipt_time on the backend side. Reject entire message if JSON is malformed; reject individual ticks if fields are missing/invalid; pass valid ticks to market_data consumer
+- [X] T003 Extend src/scalping_core/tcp_broker_adapter.py to parse optional MARKET_STATUS messages: pair (str), is_market_open (bool), server_time (ISO 8601). Forward to market_data consumer. Ignore unknown message types for forward compatibility
 
 **Checkpoint**: TCP adapter delivers parsed ticks and market status to the market data layer
 
@@ -43,9 +43,10 @@ TCP protocol with TICK_DATA and MARKET_STATUS messages.
 
 **Independent Test**: Send valid and invalid ticks → verify acceptance/rejection with correct reasons
 
-- [ ] T004 [US1] Implement tick validation in src/scalping_core/market_data.py: for each tick check structural validity (all fields present), finite/positive bid and ask, ask >= bid (else CROSSED), correct pair mapping (known canonical symbol from Phase 2), advancing broker_timestamp per pair (else DUPLICATE/REORDERED), local_receipt_time freshness against configurable staleness threshold (else STALE). Set validation_status enum accordingly. Return only VALID ticks to downstream consumers
-- [ ] T005 [US1] Implement staleness detection in src/scalping_core/market_data.py: track last_tick_time per pair, compare against configurable staleness_threshold (positive duration, per pair). When no tick arrives within threshold, mark pair as stale (is_stale = True) and block signal generation for that pair. Staleness threshold default requires owner approval — fail closed if not configured (FR-009, FR-006)
-- [ ] T006 [US1] Write unit tests in tests/test_market_data.py: test tick validation for each rejection reason (CROSSED bid/ask, STALE timestamp, DUPLICATE broker_timestamp, MALFORMED missing fields, REORDERED earlier timestamp), test valid tick acceptance, test staleness detection (fresh → stale → fresh transitions), test that downstream receives only VALID ticks
+- [X] T004 [US1] Implement tick validation in src/scalping_core/market_data.py: for each tick check structural validity (all fields present), finite/positive bid and ask, ask >= bid (else CROSSED), correct pair mapping (known canonical symbol from Phase 2), advancing broker_timestamp per pair (else DUPLICATE/REORDERED), local_receipt_time freshness against configurable staleness threshold (else STALE). Set validation_status enum accordingly. Return only VALID ticks to downstream consumers
+- [X] T005 [US1] Implement staleness detection in src/scalping_core/market_data.py: track last_tick_time per pair, compare against configurable staleness_threshold (positive duration, per pair). When no tick arrives within threshold, mark pair as stale (is_stale = True) and block signal generation for that pair. Staleness threshold default requires owner approval — fail closed if not configured (FR-009, FR-006)
+- [X] T006 [US1] Write unit tests in tests/test_market_data.py: test tick validation for each rejection reason (CROSSED bid/ask, STALE timestamp, DUPLICATE broker_timestamp, MALFORMED missing fields, REORDERED earlier timestamp), test valid tick acceptance, test staleness detection (fresh → stale → fresh transitions), test that downstream receives only VALID ticks
+- [X] T006b [US1] Add timing assertion in tests/test_market_data.py: validate that single-tick processing (validation + staleness check) completes within 100ms (SC-001). Use time.perf_counter, not wall clock. Mark test as synthetic benchmark (not live-feed proof per Principle VIII)
 
 **Checkpoint**: Tick validation works — valid ticks accepted, invalid ticks rejected with reasons
 
@@ -57,9 +58,9 @@ TCP protocol with TICK_DATA and MARKET_STATUS messages.
 
 **Independent Test**: Send batches with duplicates, gaps, new run counters → verify correct handling
 
-- [ ] T007 [US2] Implement batch processing in src/scalping_core/market_data.py: accept TickBatch, process each tick individually through validation (T004), track batch_sequence per run_counter per pair. Detect sequence gaps (batch_sequence jumps) and set has_gap=True, log degraded interval. Detect EA run boundaries (new run_counter) and set is_run_boundary=True, reset sequence tracking, quarantine rolling indicators
-- [ ] T008 [US2] Implement deduplication in src/scalping_core/market_data.py: within a batch, discard ticks whose broker_timestamp matches or precedes an already-accepted tick for the same pair. Track ring-buffer overwrites from EA (run_counter change with lower sequence). Log deduplication counts per batch
-- [ ] T009 [US2] Write unit tests in tests/test_market_data.py: test batch with duplicates (same broker_timestamp), test sequence gap detection, test EA restart (new run_counter), test batch ordering, test degraded interval marking
+- [X] T007 [US2] Implement batch processing in src/scalping_core/market_data.py: accept TickBatch, process each tick individually through validation (T004), track batch_sequence per run_counter per pair. Detect sequence gaps (batch_sequence jumps) and set has_gap=True, log degraded interval. Detect EA run boundaries (new run_counter) and set is_run_boundary=True, reset sequence tracking, quarantine rolling indicators
+- [X] T008 [US2] Implement deduplication in src/scalping_core/market_data.py: within a batch, discard ticks whose broker_timestamp matches or precedes an already-accepted tick for the same pair. Track ring-buffer overwrites from EA (run_counter change with lower sequence). Log deduplication counts per batch
+- [X] T009 [US2] Write unit tests in tests/test_market_data.py: test batch with duplicates (same broker_timestamp), test sequence gap detection, test EA restart (new run_counter), test batch ordering, test degraded interval marking, test that sequence gaps produce degraded-interval markers only — no synthetic/interpolated ticks are created (FR-012)
 
 **Checkpoint**: Batch processing handles duplicates, gaps, and EA restarts correctly
 
@@ -71,9 +72,9 @@ TCP protocol with TICK_DATA and MARKET_STATUS messages.
 
 **Independent Test**: Feed known tick sequence → verify spread matches manual calculation using contract spec
 
-- [ ] T010 [US3] Implement spread calculation in src/scalping_core/spread_engine.py: compute spread_pips = (ask - bid) / point using the pair's ContractSpecification.point from Phase 2 (no hardcoded pip assumptions per FR-003). Create SpreadSnapshot for each valid tick. Reject calculation if contract spec is unavailable or stale
-- [ ] T011 [US3] Implement rolling spread statistics in src/scalping_core/spread_engine.py: maintain SpreadStatistics per pair with all 9 metrics from §12.1 — current (latest spread_pips: non-negative Decimal), average (rolling mean: non-negative Decimal), median (rolling median: non-negative Decimal), maximum (rolling max: non-negative Decimal), minimum (rolling min: non-negative Decimal), volatility (standard deviation: non-negative Decimal), percentile (current spread's rank 0–100), trend (WIDENING/NARROWING/STABLE based on recent direction), anomaly_flag (bool, set when spread exceeds statistical threshold). Track window_size (positive int). Update on each new valid tick
-- [ ] T012 [US3] Write unit tests in tests/test_spread_engine.py: test spread calculation against known bid/ask with specific contract spec (digits=5, point=0.00001), test all 9 statistics update correctly on tick sequence, test stale contract spec rejection, test that spread uses broker point not hardcoded value
+- [X] T010 [US3] Implement spread calculation in src/scalping_core/spread_engine.py: compute spread_pips = (ask - bid) / point using the pair's ContractSpecification.point from Phase 2 (no hardcoded pip assumptions per FR-003). Create SpreadSnapshot for each valid tick. Reject calculation if contract spec is unavailable or stale. On each calculation, verify contract spec version/timestamp has not changed since last use; if changed mid-session, log the change and recalculate with updated spec. If spec freshness cannot be determined, reject calculation (fail-closed)
+- [X] T011 [US3] Implement rolling spread statistics in src/scalping_core/spread_engine.py: maintain SpreadStatistics per pair with all 9 metrics from §12.1 — current (latest spread_pips: non-negative Decimal), average (rolling mean: non-negative Decimal), median (rolling median: non-negative Decimal), maximum (rolling max: non-negative Decimal), minimum (rolling min: non-negative Decimal), volatility (standard deviation: non-negative Decimal), percentile (current spread's rank 0–100), trend (WIDENING/NARROWING/STABLE: compare average of last N spreads to previous N where N = trend_lookback, configurable, owner-approved), anomaly_flag (bool, set when current spread exceeds configurable anomaly_multiplier × rolling standard deviation above rolling mean; anomaly_multiplier requires owner approval — fail closed if unconfigured). Track window_size (configurable positive int, owner-approved default required — fail closed if unconfigured). Update on each new valid tick
+- [X] T012 [US3] Write unit tests in tests/test_spread_engine.py: test spread calculation against known bid/ask with specific contract spec (digits=5, point=0.00001), test all 9 statistics update correctly on tick sequence, test stale contract spec rejection, test that spread uses broker point not hardcoded value
 
 **Checkpoint**: Spread calculated correctly in broker pips with rolling statistics
 
@@ -85,9 +86,9 @@ TCP protocol with TICK_DATA and MARKET_STATUS messages.
 
 **Independent Test**: Set manual threshold → feed ticks above/below → verify entry blocking
 
-- [ ] T013 [US4] Implement SpreadGate in src/scalping_core/spread_engine.py: per-pair gate with manual_max_spread (positive Decimal or NULL if unconfigured) and adaptive_threshold (positive Decimal or NULL if unconfigured). On each spread update: manual_gate_passing = current spread <= manual_max_spread, adaptive_gate_passing = current spread <= adaptive_threshold. entry_eligible = both gates passing AND neither is NULL. If either is NULL → entry_eligible = False (fail-closed per FR-006)
-- [ ] T014 [US4] Implement spread gate query interface in src/scalping_core/spread_engine.py: is_entry_eligible(pair) → bool that downstream consumers (strategy, execution) call before entry. Returns False if either gate is unconfigured, either gate is failing, or market health indicates stale/recovering state. Log gate state changes (pass→fail, fail→pass)
-- [ ] T015 [US4] Write unit tests in tests/test_spread_engine.py: test entry blocked when spread > manual max, test entry blocked when spread > adaptive threshold, test fail-closed when manual NULL, test fail-closed when adaptive NULL, test entry permitted when both pass, test that spread gate does NOT affect existing positions (FR-008)
+- [X] T013 [US4] Implement SpreadGate in src/scalping_core/spread_engine.py: per-pair gate with manual_max_spread (positive Decimal or NULL if unconfigured) and adaptive_threshold (positive Decimal or NULL if unconfigured). On each spread update: manual_gate_passing = current spread <= manual_max_spread, adaptive_gate_passing = current spread <= adaptive_threshold. entry_eligible = both gates passing AND neither is NULL. If either is NULL → entry_eligible = False (fail-closed per FR-006)
+- [X] T014 [US4] Implement spread gate query interface in src/scalping_core/spread_engine.py: is_entry_eligible(pair) → bool that downstream consumers (strategy, execution) call before entry. Returns False if either gate is unconfigured, either gate is failing, or market health indicates stale/recovering state. Log gate state changes (pass→fail, fail→pass)
+- [X] T015 [US4] Write unit tests in tests/test_spread_engine.py: test entry blocked when spread > manual max, test entry blocked when spread > adaptive threshold, test fail-closed when manual NULL, test fail-closed when adaptive NULL, test entry permitted when both pass, test that spread gate does NOT affect existing positions (FR-008)
 
 **Checkpoint**: Spread gates enforce entry blocking; fail-closed when unconfigured
 
@@ -99,8 +100,8 @@ TCP protocol with TICK_DATA and MARKET_STATUS messages.
 
 **Independent Test**: Trigger spike → feed 60s stable → entries re-enabled; spike during recovery → timer resets
 
-- [ ] T016 [US5] Implement stability recovery state machine in src/scalping_core/spread_engine.py: per-pair states NORMAL → ABNORMAL (spread gate violation) → RECOVERING (spread returns within limits, start 60s timer) → NORMAL (timer expires). RECOVERING → ABNORMAL if spread spikes again (timer resets to zero). Track stability_timer_start and stability_duration (default 60s). Entry blocked during ABNORMAL and RECOVERING states
-- [ ] T017 [US5] Write unit tests in tests/test_spread_engine.py: test NORMAL→ABNORMAL transition on gate violation, test ABNORMAL→RECOVERING when spread normalizes, test RECOVERING→NORMAL after 60s stable, test RECOVERING→ABNORMAL on second spike (timer reset), test per-pair isolation (one pair abnormal doesn't affect others)
+- [X] T016 [US5] Implement stability recovery state machine in src/scalping_core/spread_engine.py: per-pair states NORMAL → ABNORMAL (spread gate violation) → RECOVERING (spread returns within limits, start 60s timer) → NORMAL (timer expires). RECOVERING → ABNORMAL if spread spikes again (timer resets to zero). Track stability_timer_start and stability_duration (default 60s). Entry blocked during ABNORMAL and RECOVERING states
+- [X] T017 [US5] Write unit tests in tests/test_spread_engine.py: test NORMAL→ABNORMAL transition on gate violation, test ABNORMAL→RECOVERING when spread normalizes, test RECOVERING→NORMAL after 60s stable, test RECOVERING→ABNORMAL on second spike (timer reset), test per-pair isolation (one pair abnormal doesn't affect others)
 
 **Checkpoint**: Stability recovery prevents premature re-entry after spread spikes
 
@@ -112,8 +113,8 @@ TCP protocol with TICK_DATA and MARKET_STATUS messages.
 
 **Independent Test**: Simulate no-tick period → stale detected; ticks resume with wide spreads → unstable reopening flagged
 
-- [ ] T018 [US6] Implement MarketHealthState in src/scalping_core/market_data.py: per-pair state tracking is_stale (bool), last_tick_time (timestamp or NULL), staleness_threshold (positive duration, per pair), tick_activity_level (NORMAL/LOW/NONE based on recent tick rate), is_spread_abnormal (from SpreadGate), is_recovering (from stability state machine), is_entry_blocked (True if any condition blocks). Detect reduced tick activity by comparing tick rate to a rolling baseline. Detect market closure as extended NONE activity. Detect unstable reopening as ticks resuming after NONE period — require stability confirmation before entries
-- [ ] T019 [US6] Write unit tests in tests/test_market_data.py: test stale detection (no ticks beyond threshold), test tick activity level transitions (NORMAL→LOW→NONE), test unstable reopening detection (NONE→ticks arrive with wide spread), test that anomaly detection uses observed data not hardcoded schedules, test is_entry_blocked aggregation (any blocking condition → blocked)
+- [X] T018 [US6] Implement MarketHealthState in src/scalping_core/market_data.py: per-pair state tracking is_stale (bool), last_tick_time (timestamp or NULL), staleness_threshold (positive duration, per pair), tick_activity_level (NORMAL/LOW/NONE based on recent tick rate), is_spread_abnormal (from SpreadGate), is_recovering (from stability state machine via spread_engine.py T016 — market_data.py reads these values, does not reimplement them), is_entry_blocked (True if any condition blocks). Detect reduced tick activity by comparing tick rate to a rolling baseline. Tick activity level thresholds (ticks/second for NORMAL→LOW, duration for LOW→NONE) are configurable per pair and require owner approval — fail closed (entries blocked) if not configured. Rolling baseline window for tick rate is configurable (owner-approved). Detect market closure as extended NONE activity. Detect unstable reopening as ticks resuming after NONE period — require stability confirmation before entries
+- [X] T019 [US6] Write unit tests in tests/test_market_data.py: test stale detection (no ticks beyond threshold), test tick activity level transitions (NORMAL→LOW→NONE), test unstable reopening detection (NONE→ticks arrive with wide spread), test that anomaly detection uses observed data not hardcoded schedules, test is_entry_blocked aggregation (any blocking condition → blocked)
 
 **Checkpoint**: Market anomalies detected from observed data; entries blocked during anomalous conditions
 
@@ -123,8 +124,8 @@ TCP protocol with TICK_DATA and MARKET_STATUS messages.
 
 **Purpose**: EA tick delivery, integration, and end-to-end validation
 
-- [ ] T020 [P] Extend mql5/ReadOnlyConnector.mq5 to send TICK_DATA messages: batch ticks per contracts/tick-protocol.md format (pair as broker symbol, run_counter incrementing on EA restart, batch_sequence monotonically increasing, ticks array with bid/ask/broker_timestamp). Optionally send MARKET_STATUS messages with is_market_open and server_time
-- [ ] T021 Run quickstart.md validation scenarios end-to-end and record PASS/FAIL evidence for each scenario (owner performs live MT5 tick validation; automated tests use synthetic tick sequences)
+- [X] T020 [P] Extend mql5/ReadOnlyConnector.mq5 to send TICK_DATA messages: batch ticks per contracts/tick-protocol.md format (pair as broker symbol, run_counter incrementing on EA restart, batch_sequence monotonically increasing, ticks array with bid/ask/broker_timestamp). Optionally send MARKET_STATUS messages with is_market_open and server_time
+- [ ] T021 Run quickstart.md validation scenarios end-to-end and record PASS/FAIL evidence for each scenario (synthetic automated scenarios pass; owner live MT5 tick validation remains pending)
 
 ---
 
@@ -149,7 +150,7 @@ TCP protocol with TICK_DATA and MARKET_STATUS messages.
 - **US3 (P1)**: Depends on US1 (spread calc needs validated ticks)
 - **US4 (P1)**: Depends on US3 (gates need spread values)
 - **US5 (P2)**: Depends on US4 (stability needs gates)
-- **US6 (P2)**: Depends on US1 + US4 (health combines staleness + spread)
+- **US6 (P2)**: Depends on US1 + US4 + US5 (health combines staleness + spread gate + stability recovery)
 
 ### Parallel Opportunities
 

@@ -83,7 +83,7 @@ from .risk_gate import (
     RiskState,
     evaluate_entry,
 )
-from .spread_engine import SpreadSnapshot, SpreadTracker
+from .spread_engine import SpreadSnapshot, SpreadTracker, StabilityState
 from .stop_loss import StopLossResult, calculate_stop_loss
 from .strategy_types import Signal, SignalDirection
 
@@ -661,6 +661,10 @@ class ExecutionEngine:
             has_pending_entry=self._order_manager.has_pending_for_pair(signal.canonical_pair),
             estimated_loss_usd=None,  # filled after stop calc
             loss_estimate_valid=False,
+            spread_gate_eligible=spread_tracker.is_entry_eligible(
+                market_stale=not feed.is_fresh(),
+                market_recovering=spread_snap.stability_state is StabilityState.RECOVERING,
+            ),
         )
 
         # §10.2: Stop loss calculation
@@ -701,6 +705,7 @@ class ExecutionEngine:
             has_pending_entry=entry_check.has_pending_entry,
             estimated_loss_usd=stop_result.estimated_loss_usd,
             loss_estimate_valid=stop_result.approved,
+            spread_gate_eligible=entry_check.spread_gate_eligible,
         )
 
         entry_decision = evaluate_entry(entry_check)

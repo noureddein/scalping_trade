@@ -6,6 +6,7 @@ and the rest of scalping_core.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 
@@ -105,15 +106,89 @@ class ContractSpec:
         return self.commission_per_lot
 
 
+class TickValidationStatus(str, Enum):
+    VALID = "VALID"
+    CROSSED = "CROSSED"
+    STALE = "STALE"
+    DUPLICATE = "DUPLICATE"
+    MALFORMED = "MALFORMED"
+    REORDERED = "REORDERED"
+
+
 @dataclass(frozen=True, slots=True)
 class Tick:
-    """Single price update from the broker."""
-    broker_symbol: str
+    """Single price update, with legacy and Phase 3 timestamp fields."""
+    broker_symbol: str = ""
+    bid: Decimal = Decimal(0)
+    ask: Decimal = Decimal(0)
+    server_time_ms: int = 0
+    recv_time_mono: float = 0.0
+    is_newest: bool = True  # False for historical ticks within a batch
+    pair: str | None = None
+    broker_timestamp: datetime | None = None
+    local_receipt_time: float | None = None
+    batch_sequence: int = 0
+    run_counter: int = 0
+    validation_status: TickValidationStatus = TickValidationStatus.MALFORMED
+
+    def __post_init__(self) -> None:
+        if self.local_receipt_time is None:
+            object.__setattr__(self, "local_receipt_time", self.recv_time_mono)
+        if self.broker_timestamp is None and self.server_time_ms:
+            from datetime import timezone
+            object.__setattr__(self, "broker_timestamp", datetime.fromtimestamp(
+                self.server_time_ms / 1000, tz=timezone.utc
+            ))
+        if self.pair is None:
+            object.__setattr__(self, "pair", self.broker_symbol)
+
+
+@dataclass(frozen=True, slots=True)
+class TickBatch:
+    pair: str
+    sequence_number: int
+    run_counter: int
+    tick_count: int
+    has_gap: bool = False
+    is_run_boundary: bool = False
+
+    def __post_init__(self) -> None:
+        if (not self.pair or isinstance(self.sequence_number, bool) or not isinstance(self.sequence_number, int)
+                or isinstance(self.run_counter, bool) or not isinstance(self.run_counter, int)
+                or isinstance(self.tick_count, bool) or not isinstance(self.tick_count, int)
+                or self.sequence_number < 0 or self.run_counter < 0 or self.tick_count <= 0):
+            raise ValueError("TickBatch requires pair, non-negative sequence/run, and positive tick count")
+
+
+class SpreadTrend(str, Enum):
+    WIDENING = "WIDENING"
+    NARROWING = "NARROWING"
+    STABLE = "STABLE"
+
+
+class TickActivityLevel(str, Enum):
+    NORMAL = "NORMAL"
+    LOW = "LOW"
+    NONE = "NONE"
+
+
+@dataclass(frozen=True, slots=True)
+class SpreadSnapshot:
+    pair: str
+    spread_pips: Decimal
     bid: Decimal
     ask: Decimal
-    server_time_ms: int   # Broker server time, ms since Unix epoch
-    recv_time_mono: float  # time.monotonic() at Python receipt
-    is_newest: bool = True  # False for historical ticks within a batch
+    timestamp: datetime
+
+    def __post_init__(self) -> None:
+        if not self.pair:
+            raise ValueError("spread snapshot pair is required")
+        if (not self.spread_pips.is_finite() or self.spread_pips < 0
+                or not self.bid.is_finite() or not self.ask.is_finite()
+                or self.bid <= 0 or self.ask < self.bid):
+            raise ValueError("spread snapshot prices and spread are invalid")
+        if self.timestamp.tzinfo is None:
+            raise ValueError("spread snapshot timestamp must be timezone-aware")
 
 
 @dataclass(frozen=True, slots=True)

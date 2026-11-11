@@ -783,9 +783,24 @@ void OnTick()
   }
 
 //+------------------------------------------------------------------+
+//| Format one broker timestamp as ISO 8601 UTC with milliseconds.     |
+//+------------------------------------------------------------------+
+string FormatBrokerTimestamp(long timeMsc)
+  {
+   datetime seconds = (datetime)(timeMsc / 1000);
+   int millis = (int)(timeMsc % 1000);
+   MqlDateTime parts;
+   TimeToStruct(seconds, parts);
+   return StringFormat("%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
+                       parts.year, parts.mon, parts.day,
+                       parts.hour, parts.min, parts.sec, millis);
+  }
+
+//+------------------------------------------------------------------+
 //| Batch-send buffered ticks over TCP. Called from OnTimer only.     |
-//| Wire format: {"type":"tick_batch","data":{...}} with ticks array |
-//| ordered oldest-to-newest. newest_index marks the current quote.  |
+//| Wire format: {"type":"TICK_DATA","data":{...}} per Phase 3.   |
+//| Ticks are ordered oldest-to-newest; sequence gaps mark degraded   |
+//| intervals and dropped_count reports known ring-buffer overwrites.|
 //|                                                                  |
 //| Send failure: ring and counters are NOT cleared. The same         |
 //| (ea_run_id, batch_seq) will be re-sent on the next successful    |
@@ -812,30 +827,24 @@ void FlushTickBuffer()
       int idx = (start + i) % cap;
       if(i > 0) ticksArr += ",";
       ticksArr += StringFormat(
-         "{\"bid\":\"%.10g\",\"ask\":\"%.10g\",\"server_time_ms\":%I64d}",
+         "{\"bid\":\"%.10g\",\"ask\":\"%.10g\",\"broker_timestamp\":\"%s\"}",
          g_tickRing[idx].bid,
          g_tickRing[idx].ask,
-         g_tickRing[idx].time_msc);
+         FormatBrokerTimestamp(g_tickRing[idx].time_msc));
      }
    ticksArr += "]";
 
    long dropped = g_overwrittenFlush;
    string data = StringFormat(
-      "{\"broker_symbol\":\"%s\",\"ticks\":%s,"
-      "\"newest_index\":%d,\"dropped\":%I64d,\"batch_size\":%d,"
-      "\"terminal_instance_id\":\"%s\","
-      "\"ea_instance_id\":\"%s\",\"ea_run_id\":%I64u,\"batch_seq\":%I64d}",
+      "{\"pair\":\"%s\",\"ticks\":%s,"
+      "\"dropped_count\":%I64d,\"run_counter\":%I64u,\"batch_sequence\":%I64d}",
       JsonEscape(_Symbol),
       ticksArr,
-      count - 1,
       dropped,
-      count,
-      JsonEscape(g_terminalInstanceId),
-      JsonEscape(g_eaInstanceId),
       g_eaRunId,
       g_batchSeq);
 
-   string msg = MakeMessage("tick_batch", data);
+   string msg = MakeMessage("TICK_DATA", data);
    if(!SendFrame(g_socket, msg))
      {
       // Ring, g_overwrittenFlush, and g_batchSeq are intentionally NOT

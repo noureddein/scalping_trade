@@ -107,7 +107,8 @@ contract spec. Verify rolling statistics update correctly.
 
 The system blocks new trade entries when the spread exceeds safe
 conditions, using a hybrid approach: a manual maximum spread threshold
-per pair AND an adaptive historical baseline per pair/broker. Both
+per pair AND an adaptive threshold per pair (owner-configured; the
+algorithm for deriving recommended values is deferred to §19#2). Both
 gates must pass for an entry to proceed.
 
 **Why this priority**: Spread protection is a critical safety gate.
@@ -177,8 +178,9 @@ and the unstable reopening.
 **Acceptance Scenarios**:
 
 1. **Given** no new ticks for a pair beyond the staleness threshold,
-   **When** staleness is checked, **Then** the pair is marked as having
-   stale data and entries are blocked.
+   **When** staleness is checked, **Then** the pair is marked stale
+   per US1 staleness detection and entries are blocked (cross-ref
+   US1-AS4).
 2. **Given** a sudden return of ticks after a quiet period, **When**
    the first ticks arrive, **Then** the system treats the reopening
    as potentially unstable and requires stability confirmation before
@@ -223,8 +225,10 @@ and the unstable reopening.
   pair: current, average, median, max, min, volatility, percentile,
   trend, anomalies (§12.1).
 - **FR-005**: The system MUST enforce a hybrid spread gate per pair:
-  manual max spread AND adaptive historical baseline. Both MUST pass
-  for entry eligibility.
+  manual max spread AND adaptive threshold. Both MUST pass for entry
+  eligibility. The adaptive threshold is an owner-configured value
+  per pair; the computation algorithm for deriving recommended values
+  is deferred to §19 decision #2.
 - **FR-006**: The system MUST fail closed when either spread gate is
   not configured for a pair — no entry without both gates.
 - **FR-007**: After a spread abnormality, the system MUST require 60
@@ -296,3 +300,11 @@ and the unstable reopening.
   default requires owner approval.
 - Tick-density/activity measures represent quote updates, not
   centralized traded volume, per strategy design §3.2.
+- Tick activity level thresholds (what tick rate constitutes NORMAL,
+  LOW, or NONE) require owner approval. Fail closed (block entries)
+  if not configured.
+- The anomaly_flag statistical threshold (e.g., N standard deviations
+  above rolling mean) requires owner approval (§19 decision). Fail
+  closed if not configured.
+- The SpreadStatistics rolling window_size requires owner approval.
+  Fail closed if not configured.

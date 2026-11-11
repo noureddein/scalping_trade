@@ -59,6 +59,9 @@ Message types (EA → backend, read-only phase):
             reset (new EA lifetime). Run transition counted.
           - Gaps are tracked for observability, never treated as proof of
             lossless or lossy capture.
+    "TICK_DATA"       — Phase 3 canonical tick batches (ISO timestamps,
+                        run_counter and batch_sequence fields)
+    "MARKET_STATUS"   — optional market-open observation from the EA
 
 Response types (backend → EA, read-only phase):
     "request"         — request data from EA (e.g. get_symbols, get_account, get_contracts)
@@ -88,6 +91,7 @@ import struct
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 
 from .broker_adapter import BrokerAdapter, BrokerUnavailableError, SymbolUnavailableError, _is_forex_canonical
@@ -143,11 +147,15 @@ class TcpBrokerAdapter(BrokerAdapter):
         heartbeat_timeout_s: float = 10.0,
         data_staleness_s: float = 30.0,
         on_tick: "Callable[[Tick], None] | None" = None,
+        on_tick_batch: "Callable[[str, int, int, list[Tick], int], None] | None" = None,
+        on_market_status: "Callable[[str, bool, datetime], None] | None" = None,
     ) -> None:
         self._port = port
         self._heartbeat_timeout_s = heartbeat_timeout_s
         self._data_staleness_s = data_staleness_s
         self._on_tick = on_tick
+        self._on_tick_batch = on_tick_batch
+        self._on_market_status = on_market_status
 
         self._server_sock: socket.socket | None = None
         self._client_sock: socket.socket | None = None
@@ -258,6 +266,16 @@ class TcpBrokerAdapter(BrokerAdapter):
             if time.monotonic() - ts > self._data_staleness_s:
                 raise BrokerUnavailableError(f"contract specification is stale: {broker_symbol}")
             return spec
+
+    def get_contract_spec_updated_at(self, broker_symbol: str) -> float | None:
+        with self._lock:
+            self._require_ready_locked()
+            if broker_symbol not in self._contracts:
+                return None
+            updated_at = self._contracts_time.get(broker_symbol)
+            if updated_at is None or time.monotonic() - updated_at > self._data_staleness_s:
+                return None
+            return updated_at
 
     def update_mapping(self, canonical_name: str, broker_name: str) -> SymbolMapping:
         if not _is_forex_canonical(canonical_name):
@@ -394,7 +412,7 @@ class TcpBrokerAdapter(BrokerAdapter):
 
     _KNOWN_TYPES = frozenset({
         "heartbeat", "account_info", "symbol_list", "contract_spec",
-        "tick", "tick_batch",
+        "tick", "tick_batch", "tick_data", "market_status",
     })
 
     def _handle_message(self, payload: bytes) -> None:
@@ -406,7 +424,8 @@ class TcpBrokerAdapter(BrokerAdapter):
         if not isinstance(msg, dict):
             _LOGGER.warning("discarding malformed broker message: expected a JSON object")
             return
-        msg_type = msg.get("type")
+        raw_type = msg.get("type")
+        msg_type = raw_type.lower() if isinstance(raw_type, str) else raw_type
         if msg_type not in self._KNOWN_TYPES:
             _LOGGER.warning("discarding broker message with unknown type: %r", msg_type)
             return
@@ -418,6 +437,8 @@ class TcpBrokerAdapter(BrokerAdapter):
         accepted = False
         tick: Tick | None = None
         batch_ticks: list[Tick] | None = None
+        tick_metadata: tuple[str, int, int, int] | None = None
+        market_status: tuple[str, bool, datetime] | None = None
 
         with self._lock:
             if msg_type == "heartbeat":
@@ -482,6 +503,35 @@ class TcpBrokerAdapter(BrokerAdapter):
                         )
                         accepted = True
 
+            elif msg_type == "tick_data":
+                parsed = _parse_tick_data(data, now)
+                if parsed is not None:
+                    broker_pair, run_counter, sequence_number, dropped_count, batch_ticks = parsed
+                    mapping = next((m for m in self._owner_mappings.values()
+                                    if m.broker_symbol == broker_pair and m.confirmed_by_owner), None)
+                    if mapping is not None:
+                        batch_ticks = [Tick(
+                            broker_symbol=t.broker_symbol, bid=t.bid, ask=t.ask,
+                            server_time_ms=t.server_time_ms, recv_time_mono=t.recv_time_mono,
+                            is_newest=t.is_newest, pair=mapping.canonical_pair,
+                            broker_timestamp=t.broker_timestamp,
+                            local_receipt_time=t.local_receipt_time,
+                            batch_sequence=sequence_number, run_counter=run_counter,
+                        ) for t in batch_ticks]
+                        accepted = True
+                        tick_metadata = (mapping.canonical_pair, run_counter,
+                                         sequence_number, dropped_count)
+
+            elif msg_type == "market_status":
+                parsed_status = _parse_market_status(data)
+                if parsed_status is not None:
+                    broker_pair, is_open, server_time = parsed_status
+                    mapping = next((m for m in self._owner_mappings.values()
+                                    if m.broker_symbol == broker_pair and m.confirmed_by_owner), None)
+                    if mapping is not None:
+                        market_status = (mapping.canonical_pair, is_open, server_time)
+                        accepted = True
+
             if accepted:
                 self._last_message_time = now
                 if msg_type == "account_info":
@@ -492,6 +542,12 @@ class TcpBrokerAdapter(BrokerAdapter):
         if msg_type == "tick_batch" and batch_ticks and self._on_tick is not None:
             for t in batch_ticks:
                 self._on_tick(t)
+        if msg_type == "tick_data" and tick_metadata is not None:
+            pair, run_counter, sequence_number, dropped_count = tick_metadata
+            if self._on_tick_batch is not None:
+                self._on_tick_batch(pair, sequence_number, run_counter, batch_ticks or [], dropped_count)
+        if msg_type == "market_status" and market_status is not None and self._on_market_status is not None:
+            self._on_market_status(*market_status)
 
     def send_request(self, request_type: str, params: dict | None = None) -> bool:
         """Send a request message to the EA. Returns False if no client."""
@@ -587,6 +643,83 @@ def _parse_tick(data: dict, recv_mono: float) -> Tick | None:
             recv_time_mono=recv_mono,
         )
     except (KeyError, ValueError, TypeError, InvalidOperation):
+        return None
+
+
+def _parse_tick_data(
+    data: dict, recv_mono: float,
+) -> tuple[str, int, int, int, list[Tick]] | None:
+    """Parse Phase 3 TICK_DATA; malformed items are rejected individually."""
+    try:
+        pair = data["pair"]
+        run_counter = data["run_counter"]
+        sequence = data["batch_sequence"]
+        raw_ticks = data["ticks"]
+        dropped = data.get("dropped_count", 0)
+        if not isinstance(pair, str) or not pair.strip():
+            return None
+        if (isinstance(run_counter, bool) or not isinstance(run_counter, int) or run_counter < 0
+                or isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 0
+                or isinstance(dropped, bool) or not isinstance(dropped, int) or dropped < 0):
+            return None
+        if not isinstance(raw_ticks, list):
+            return None
+        if not raw_ticks:
+            return None
+        ticks: list[Tick] = []
+        rejected = 0
+        for index, item in enumerate(raw_ticks):
+            if not isinstance(item, dict):
+                rejected += 1
+                continue
+            try:
+                bid = Decimal(str(item["bid"]))
+                ask = Decimal(str(item["ask"]))
+                stamp_text = item["broker_timestamp"]
+                if not isinstance(stamp_text, str):
+                    rejected += 1
+                    continue
+                stamp = datetime.fromisoformat(stamp_text.replace("Z", "+00:00"))
+                if stamp.tzinfo is None:
+                    rejected += 1
+                    continue
+                if not bid.is_finite() or not ask.is_finite() or bid <= 0 or ask < bid:
+                    rejected += 1
+                    continue
+                stamp = stamp.astimezone(timezone.utc)
+                ticks.append(Tick(
+                    broker_symbol=pair, pair=pair, bid=bid, ask=ask,
+                    server_time_ms=int(stamp.timestamp() * 1000),
+                    recv_time_mono=recv_mono, local_receipt_time=recv_mono,
+                    broker_timestamp=stamp, batch_sequence=sequence,
+                    run_counter=run_counter, is_newest=(index == len(raw_ticks) - 1),
+                ))
+            except (KeyError, ValueError, TypeError, InvalidOperation, OverflowError):
+                rejected += 1
+                continue
+        if rejected:
+            _LOGGER.warning("rejected %d malformed or crossed ticks from TICK_DATA for %s", rejected, pair)
+        if not ticks:
+            return None
+        return pair.strip(), run_counter, sequence, dropped, ticks
+    except (KeyError, TypeError):
+        return None
+
+
+def _parse_market_status(data: dict) -> tuple[str, bool, datetime] | None:
+    try:
+        pair = data["pair"]
+        is_open = data["is_market_open"]
+        raw_time = data["server_time"]
+        if not isinstance(pair, str) or not pair.strip() or not isinstance(is_open, bool):
+            return None
+        if not isinstance(raw_time, str):
+            return None
+        server_time = datetime.fromisoformat(raw_time.replace("Z", "+00:00"))
+        if server_time.tzinfo is None:
+            return None
+        return pair.strip(), is_open, server_time.astimezone(timezone.utc)
+    except (KeyError, ValueError, TypeError):
         return None
 
 

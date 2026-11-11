@@ -203,7 +203,7 @@ def _active_engine(
 
 
 def _feed(tick: Tick | None = None) -> PairFeed:
-    f = PairFeed(_contract())
+    f = PairFeed(_contract(), staleness_threshold_ms=5000, max_tick_age_s=10.0)
     t = tick or _fresh_tick()
     f.process_tick(t)
     return f
@@ -211,6 +211,8 @@ def _feed(tick: Tick | None = None) -> PairFeed:
 
 def _spread_tracker() -> SpreadTracker:
     return SpreadTracker(SpreadConfig(manual_max_spread=Decimal("3.0"),
+        adaptive_threshold=Decimal("3.0"), rolling_window_size=100,
+        trend_lookback=2, anomaly_multiplier=Decimal("3.0"),
                                        stability_period_s=0.0))
 
 
@@ -386,6 +388,8 @@ def test_successful_entry():
 
     spread_tracker = SpreadTracker(SpreadConfig(
         manual_max_spread=Decimal("3.0"),
+        adaptive_threshold=Decimal("3.0"), rolling_window_size=100,
+        trend_lookback=2, anomaly_multiplier=Decimal("3.0"),
         stability_period_s=0.0,
     ))
     spread_tracker.update(Decimal("2.0"), tick.recv_time_mono - 70)
@@ -439,7 +443,9 @@ def test_broker_rejection_handled():
     engine = _active_engine(adapter=adapter, reservation=reservation)
 
     spread_tracker = SpreadTracker(SpreadConfig(
-        manual_max_spread=Decimal("3.0"), stability_period_s=0.0))
+        manual_max_spread=Decimal("3.0"),
+        adaptive_threshold=Decimal("3.0"), rolling_window_size=100,
+        trend_lookback=2, anomaly_multiplier=Decimal("3.0"), stability_period_s=0.0))
     spread_tracker.update(Decimal("2.0"), tick.recv_time_mono - 70)
     spread_tracker.update(Decimal("2.0"), tick.recv_time_mono)
 
@@ -469,7 +475,9 @@ def test_ambiguous_order_not_assumed_filled():
     engine = _active_engine(adapter=adapter, reservation=reservation)
 
     spread_tracker = SpreadTracker(SpreadConfig(
-        manual_max_spread=Decimal("3.0"), stability_period_s=0.0))
+        manual_max_spread=Decimal("3.0"),
+        adaptive_threshold=Decimal("3.0"), rolling_window_size=100,
+        trend_lookback=2, anomaly_multiplier=Decimal("3.0"), stability_period_s=0.0))
     spread_tracker.update(Decimal("2.0"), tick.recv_time_mono - 70)
     spread_tracker.update(Decimal("2.0"), tick.recv_time_mono)
 
@@ -511,7 +519,9 @@ def test_gate_submission_failure_blocks_adapter_and_holds_reservation():
     engine = _active_engine(adapter=adapter, reservation=reservation)
 
     spread_tracker = SpreadTracker(SpreadConfig(
-        manual_max_spread=Decimal("3.0"), stability_period_s=0.0))
+        manual_max_spread=Decimal("3.0"),
+        adaptive_threshold=Decimal("3.0"), rolling_window_size=100,
+        trend_lookback=2, anomaly_multiplier=Decimal("3.0"), stability_period_s=0.0))
     spread_tracker.update(Decimal("2.0"), tick.recv_time_mono - 70)
     spread_tracker.update(Decimal("2.0"), tick.recv_time_mono)
 
@@ -556,7 +566,9 @@ def test_resolve_admission_failure_does_not_assume_completion():
     engine = _active_engine(adapter=adapter, reservation=reservation)
 
     spread_tracker = SpreadTracker(SpreadConfig(
-        manual_max_spread=Decimal("3.0"), stability_period_s=0.0))
+        manual_max_spread=Decimal("3.0"),
+        adaptive_threshold=Decimal("3.0"), rolling_window_size=100,
+        trend_lookback=2, anomaly_multiplier=Decimal("3.0"), stability_period_s=0.0))
     spread_tracker.update(Decimal("2.0"), tick.recv_time_mono - 70)
     spread_tracker.update(Decimal("2.0"), tick.recv_time_mono)
 
@@ -632,7 +644,9 @@ def test_resolve_admission_failure_surfaces_failed_shared_halt():
     )
 
     spread_tracker = SpreadTracker(SpreadConfig(
-        manual_max_spread=Decimal("3.0"), stability_period_s=0.0))
+        manual_max_spread=Decimal("3.0"),
+        adaptive_threshold=Decimal("3.0"), rolling_window_size=100,
+        trend_lookback=2, anomaly_multiplier=Decimal("3.0"), stability_period_s=0.0))
     spread_tracker.update(Decimal("2.0"), tick.recv_time_mono - 70)
     spread_tracker.update(Decimal("2.0"), tick.recv_time_mono)
 
@@ -713,7 +727,9 @@ def test_unresolved_fill_halts_independent_engine_via_shared_barrier():
     )
 
     spread1 = SpreadTracker(SpreadConfig(
-        manual_max_spread=Decimal("3.0"), stability_period_s=0.0))
+        manual_max_spread=Decimal("3.0"),
+        adaptive_threshold=Decimal("3.0"), rolling_window_size=100,
+        trend_lookback=2, anomaly_multiplier=Decimal("3.0"), stability_period_s=0.0))
     spread1.update(Decimal("2.0"), tick1.recv_time_mono - 70)
     spread1.update(Decimal("2.0"), tick1.recv_time_mono)
 
@@ -768,7 +784,7 @@ def test_unresolved_fill_halts_independent_engine_via_shared_barrier():
         contract=make_contract("GBPUSD", tick_value="1.0", tick_size="0.00001",
                                volume_min="0.01", min_stop_distance="0"),
     )
-    gbp_feed = PairFeed(gbp_mapping.contract)
+    gbp_feed = PairFeed(gbp_mapping.contract, staleness_threshold_ms=5000, max_tick_age_s=10.0)
     gbp_feed.process_tick(Tick(
         broker_symbol="GBPUSD",
         bid=Decimal("1.26500"),
@@ -778,7 +794,9 @@ def test_unresolved_fill_halts_independent_engine_via_shared_barrier():
     ))
 
     spread2 = SpreadTracker(SpreadConfig(
-        manual_max_spread=Decimal("3.0"), stability_period_s=0.0))
+        manual_max_spread=Decimal("3.0"),
+        adaptive_threshold=Decimal("3.0"), rolling_window_size=100,
+        trend_lookback=2, anomaly_multiplier=Decimal("3.0"), stability_period_s=0.0))
     spread2.update(Decimal("2.0"), tick2.recv_time_mono - 70)
     spread2.update(Decimal("2.0"), tick2.recv_time_mono)
 
@@ -811,7 +829,9 @@ def test_duplicate_pair_position_blocked():
     engine = _active_engine(adapter=adapter)
 
     spread_tracker = SpreadTracker(SpreadConfig(
-        manual_max_spread=Decimal("3.0"), stability_period_s=0.0))
+        manual_max_spread=Decimal("3.0"),
+        adaptive_threshold=Decimal("3.0"), rolling_window_size=100,
+        trend_lookback=2, anomaly_multiplier=Decimal("3.0"), stability_period_s=0.0))
     spread_tracker.update(Decimal("2.0"), tick.recv_time_mono - 70)
     spread_tracker.update(Decimal("2.0"), tick.recv_time_mono)
 

@@ -184,6 +184,8 @@ def _engine(adapter=None, reservation=None):
 
 def _spread_tracker(tick):
     st = SpreadTracker(SpreadConfig(manual_max_spread=Decimal("3.0"),
+        adaptive_threshold=Decimal("3.0"), rolling_window_size=100,
+        trend_lookback=2, anomaly_multiplier=Decimal("3.0"),
                                      stability_period_s=0.0))
     st.update(Decimal("2.0"), tick.recv_time_mono - 70)
     st.update(Decimal("2.0"), tick.recv_time_mono)
@@ -194,7 +196,7 @@ def _attempt(engine, adapter, reservation, tick):
     return engine.attempt_entry(
         signal=_signal(),
         mapping=_mapping(),
-        feed=PairFeed(_contract()).tap(tick),
+        feed=_feed(tick),
         spread_tracker=_spread_tracker(tick),
         risk_state=RiskState.ACTIVE,
         risk_state_age_seconds=Decimal("1"),
@@ -206,7 +208,7 @@ def _attempt(engine, adapter, reservation, tick):
 
 # Helper: PairFeed doesn't have tap, use process_tick
 def _feed(tick):
-    f = PairFeed(_contract())
+    f = PairFeed(_contract(), staleness_threshold_ms=5000, max_tick_age_s=10.0)
     f.process_tick(tick)
     return f
 
