@@ -13,6 +13,13 @@ from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal
 
+from .broker_types import Tick
+from .regime_types import (
+    FeatureSnapshot, MarketRegime as RecommendationRegime, NoSignalReason,
+    NoSignalReasonCode, SignalDirection as RecommendationDirection,
+    SignalRecommendation, StrategyConfig, stable_signal_id, strategy_config_issue,
+)
+from .strategy_engine import Strategy
 from .strategy_types import (
     MarketRegime,
     PricePoint,
@@ -123,3 +130,47 @@ class MeanReversionStrategy:
             return _ZERO
         variance = sum((x - mean) ** 2 for x in values) / len(values)
         return Decimal(str(math.sqrt(float(variance))))
+
+
+class MeanReversionRecommendationStrategy(Strategy):
+    """Stateless Phase 4 mean-reversion evaluator for RANGING only."""
+
+    strategy_name = "meanrev"
+
+    def __init__(self, config: StrategyConfig | None = None) -> None:
+        self.config = config
+
+    def evaluate(self, pair: str, tick: Tick, features: FeatureSnapshot,
+                 regime: RecommendationRegime) -> SignalRecommendation | NoSignalReason:
+        issue = strategy_config_issue(self.config, self.strategy_name)
+        if issue is not None:
+            return NoSignalReason(pair, issue, "Mean-reversion parameters are absent or invalid", features.timestamp)
+        if regime is not RecommendationRegime.RANGING:
+            return NoSignalReason(pair, NoSignalReasonCode.PROHIBITED_REGIME,
+                                  f"Mean reversion is prohibited in {regime.value}", features.timestamp)
+        if features.rolling_mean is None or features.rolling_std is None:
+            return NoSignalReason(pair, NoSignalReasonCode.INSUFFICIENT_HISTORY,
+                                  "Mean-reversion window is not ready", features.timestamp)
+        if features.rolling_std == 0:
+            return NoSignalReason(pair, NoSignalReasonCode.ZERO_VARIANCE,
+                                  "Rolling price variance is zero", features.timestamp)
+        z_score = features.z_score
+        if z_score is None:
+            return NoSignalReason(pair, NoSignalReasonCode.ZERO_VARIANCE,
+                                  "Z-score is unavailable", features.timestamp)
+        threshold = self.config.parameters["deviation_threshold"]
+        if z_score < -threshold:
+            direction = RecommendationDirection.BUY
+        elif z_score > threshold:
+            direction = RecommendationDirection.SELL
+        else:
+            return NoSignalReason(pair, NoSignalReasonCode.NO_SIGNAL_CONDITIONS,
+                                  "Deviation has not reached the configured threshold", features.timestamp)
+        strength = min(Decimal(1), abs(z_score) / threshold)
+        return SignalRecommendation(
+            pair=pair, direction=direction, strategy_name=self.strategy_name, regime=regime,
+            reference_bid=tick.bid, reference_ask=tick.ask, features=features,
+            strength=strength, timestamp=features.timestamp,
+            signal_id=stable_signal_id(pair, features.timestamp, self.strategy_name,
+                                       direction, tick.bid, tick.ask),
+        )

@@ -37,8 +37,9 @@ deterministic, reproducible output.
 2. **Given** a sequence with price oscillating within a narrow range
    and near-zero slope, **When** classified, **Then** the result is
    RANGING.
-3. **Given** a price move beyond a prior channel by a significant
-   margin, **When** classified, **Then** the result is BREAKOUT.
+3. **Given** a price move beyond a prior channel by the configured
+   breakout_exceedance margin, **When** classified, **Then** the
+   result is BREAKOUT.
 4. **Given** insufficient tick history (below warm-up threshold),
    **When** classified, **Then** the result is unknown.
 5. **Given** degraded data (gaps, stale feed, crossed quotes), **When**
@@ -103,8 +104,8 @@ false breakouts.
 3. **Given** a price move caused entirely by a spread widening (not a
    genuine breakout), **When** evaluated, **Then** no signal is
    produced.
-4. **Given** a channel width below the minimum meaningful-range
-   threshold, **When** evaluated, **Then** no signal is produced.
+4. **Given** a channel width below the configured min_channel_width,
+   **When** evaluated, **Then** no signal is produced.
 
 ---
 
@@ -238,8 +239,9 @@ signal that fails quality thresholds and verify it is suppressed.
   insufficient history, ambiguous conditions, degraded data, or
   missing configuration exist.
 - **FR-004**: The momentum strategy MUST emit BUY, SELL, or no signal
-  based on EMA alignment, price velocity, and momentum strength. It
-  MUST use Ask as BUY reference and Bid as SELL reference.
+  based on EMA alignment, price velocity, and momentum strength. EMA
+  calculations MUST use mid_price = (Bid + Ask) / 2 as the input
+  series. It MUST use Ask as BUY reference and Bid as SELL reference.
 - **FR-005**: The breakout strategy MUST emit BUY, SELL, or no signal
   based on a price move beyond a prior channel. The channel MUST
   exclude the candidate observation. Spread-only jumps MUST be
@@ -332,6 +334,13 @@ signal that fails quality thresholds and verify it is suppressed.
 - Hysteresis, confirmation rules, and dwell time for regime
   transitions are unresolved (§19). Phase 4 implements the mechanism;
   actual parameters require owner approval.
+- Regime classifier thresholds — what dispersion level constitutes
+  HIGH_VOLATILITY, what slope/alignment constitutes TRENDING, what
+  range exceedance constitutes BREAKOUT, what dispersion constitutes
+  LOW_VOLATILITY — are owner-approved parameters (§19 deferred
+  decisions). Fail closed (return UNKNOWN) if not configured.
+- The warm-up threshold (minimum tick history for valid classification)
+  requires owner approval. Fail closed (return UNKNOWN) if not set.
 - Cross-pair features are out of scope for the pilot (one pair).
 - Exit rules, position management, and trade lifecycle are Phase 5
   concerns. The strategy module emits recommendations only.

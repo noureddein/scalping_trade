@@ -9,7 +9,7 @@ from decimal import Decimal
 
 import pytest
 
-from scalping_core.broker_types import ContractSpec, Tick
+from scalping_core.broker_types import ContractSpec, Tick, TickValidationStatus
 from scalping_core.strategy_types import (
     MarketRegime,
     PricePoint,
@@ -27,6 +27,13 @@ from scalping_core.strategy_engine import (
     PairStrategyEngine,
     StrategyEngine,
 )
+from scalping_core.regime_types import (
+    FeatureSnapshot, MarketRegime as RegimeV2, RegimeClassifierConfig,
+    RegimeMap, StrategyConfig, validate_strategy_parameters,
+)
+from scalping_core.strategy_engine import FeatureComputer, RegimeClassifier
+from scalping_core.strategy_engine import StrategyPipeline
+from scalping_core.regime_types import NoSignalReasonCode
 
 # Explicit regime map for tests that need routing.  Owner must supply this.
 _TEST_REGIME_MAP = dict(DEFAULT_REGIME_MAP)
@@ -48,6 +55,7 @@ def _tick(bid: str, ask: str, t_ms: int = 1000, mono: float = 1.0) -> Tick:
         broker_symbol="EURUSD",
         bid=D(bid), ask=D(ask),
         server_time_ms=t_ms, recv_time_mono=mono,
+        validation_status=TickValidationStatus.VALID,
     )
 
 
@@ -103,6 +111,119 @@ class TestSafeStart:
     def test_strategy_engine_returns_none_for_unregistered_pair(self):
         engine = StrategyEngine()
         assert engine.on_tick("EURUSD", _tick("1.09995", "1.10005"), _contract()) is None
+
+
+class TestRecommendationPipeline:
+    def test_classifier_synthetic_regime_labels(self):
+        stamp = _tick("1", "1.0002").broker_timestamp
+        cfg = RegimeClassifierConfig(1, D("1"), D("0.001"), D("0.01"),
+                                     D("0.01"), D("0.1"))
+        classifier = RegimeClassifier(cfg)
+
+        def classify(*, volatility, velocity, spread, high=None, low=None, width=None):
+            feature = FeatureSnapshot(
+                "EURUSD", stamp, D("1.0001"), D("1"), D("1.0002"),
+                ema_spread=spread, price_velocity=velocity, channel_high=high,
+                channel_low=low, channel_width=width, volatility=volatility,
+            )
+            return classifier.classify(feature, history_count=1).regime
+
+        assert classify(volatility=D("0.5"), velocity=D("0.02"), spread=D("0.02"),
+                        high=D("0.99"), low=D("0.9"), width=D("0.1")) is RegimeV2.BREAKOUT
+        assert classify(volatility=D("0.5"), velocity=D("0.02"), spread=D("0.02")) is RegimeV2.TRENDING
+        assert classify(volatility=D("0.5"), velocity=D("0"), spread=D("0"),
+                        width=D("0.5")) is RegimeV2.RANGING
+        assert classify(volatility=D("0.01"), velocity=D("0"), spread=D("0"),
+                        width=D("0.5")) is RegimeV2.LOW_VOLATILITY
+        assert classify(volatility=D("0.5"), velocity=None, spread=None) is RegimeV2.UNKNOWN
+
+    def test_classifier_priority_and_determinism(self):
+        stamp = _tick("1", "1.0002").broker_timestamp
+        feature = FeatureSnapshot(
+            "EURUSD", stamp, D("1.0001"), D("1"), D("1.0002"),
+            ema_spread=D("0.01"), price_velocity=D("0.01"),
+            channel_high=D("1"), channel_low=D("0.9"), channel_width=D("0.1"),
+            volatility=D("0.2"),
+        )
+        cfg = RegimeClassifierConfig(1, D("0.1"), D("0.001"), D("0.001"),
+                                     D("0.001"), D("0.0001"))
+        classifier = RegimeClassifier(cfg)
+        first = classifier.classify(feature, history_count=1)
+        second = classifier.classify(feature, history_count=1)
+        assert first == second
+        assert first.regime is RegimeV2.HIGH_VOLATILITY  # higher priority than breakout
+        assert classifier.classify(feature, history_count=1, has_gap=True).regime is RegimeV2.UNSTABLE
+
+    def test_pipeline_fails_closed_without_owner_configuration(self):
+        pipeline = StrategyPipeline("EURUSD", None, {}, None)
+        result = pipeline.on_tick(_tick("1.1", "1.1001"))
+        assert result.reason_code is NoSignalReasonCode.INVALID_CONFIG
+
+    def test_pipeline_has_no_execution_side_effect_dependencies(self):
+        from pathlib import Path
+        import scalping_core.breakout_strategy as breakout_module
+        import scalping_core.mean_reversion_strategy as meanrev_module
+        import scalping_core.momentum_strategy as momentum_module
+
+        for module in (breakout_module, meanrev_module, momentum_module):
+            source = Path(module.__file__).read_text()
+            assert "order_manager" not in source
+            assert "OrderSend" not in source
+            assert "position_manager" not in source
+
+    def test_pipeline_emits_complete_breakout_recommendation(self):
+        config = StrategyConfig("breakout", {
+            "channel_lookback": 2, "min_channel_width": D("0.00001"),
+            "breakout_margin": D("0.0001"), "signal_quality_threshold": D("0.1"),
+        })
+        regime_config = RegimeClassifierConfig(
+            2, D("1"), D("0.0001"), D("1"), D("1"), D("0.000001"),
+        )
+        pipeline = StrategyPipeline(
+            "EURUSD", regime_config, {"breakout": config},
+            RegimeMap({RegimeV2.BREAKOUT: "breakout"}, True),
+        )
+        pipeline.on_tick(_tick("1.00000", "1.00010", t_ms=1000))
+        pipeline.on_tick(_tick("1.00000", "1.00010", t_ms=2000))
+        result = pipeline.on_tick(_tick("1.00100", "1.00110", t_ms=3000))
+        assert not hasattr(result, "reason_code")
+        assert result.direction.value == "BUY"
+        assert result.reference_ask == D("1.00110")
+        assert {"signal_id", "pair", "direction", "strategy_name", "regime",
+                "reference_bid", "reference_ask", "strength", "features", "timestamp"} <= set(result.__dataclass_fields__)
+        assert result.regime is RegimeV2.BREAKOUT
+
+    def test_pipeline_suppresses_below_configured_quality(self):
+        config = StrategyConfig("breakout", {
+            "channel_lookback": 2, "min_channel_width": D("0.00001"),
+            "breakout_margin": D("0.0001"), "signal_quality_threshold": D("2"),
+        })
+        regime_config = RegimeClassifierConfig(
+            2, D("1"), D("0.0001"), D("1"), D("1"), D("0.000001"),
+        )
+        pipeline = StrategyPipeline(
+            "EURUSD", regime_config, {"breakout": config},
+            RegimeMap({RegimeV2.BREAKOUT: "breakout"}, True),
+        )
+        for i, (bid, ask) in enumerate((("1", "1.0001"), ("1", "1.0001"), ("1.001", "1.0011")), 1):
+            result = pipeline.on_tick(_tick(bid, ask, t_ms=i * 1000))
+        assert result.reason_code is NoSignalReasonCode.BELOW_QUALITY_THRESHOLD
+
+    def test_feature_snapshot_at_k_is_independent_of_future_ticks(self):
+        config = StrategyConfig("breakout", {
+            "channel_lookback": 2, "min_channel_width": D("0.00001"),
+            "breakout_margin": D("0.0001"), "signal_quality_threshold": D("0.1"),
+        })
+        prefix = [_tick("1.0", "1.0001", i * 1000) for i in range(1, 4)]
+        first = FeatureComputer()
+        snapshot_at_k = None
+        for tick in prefix:
+            snapshot_at_k = first.compute("EURUSD", tick, {"breakout": config})
+        future = FeatureComputer()
+        for tick in prefix:
+            later_snapshot = future.compute("EURUSD", tick, {"breakout": config})
+        future.compute("EURUSD", _tick("9", "9.1", 4000), {"breakout": config})
+        assert snapshot_at_k == later_snapshot
 
 
 # --- Regime detection with configured thresholds ---
@@ -257,6 +378,63 @@ class TestStrategyEngine:
         engine = StrategyEngine()
         engine.register_pair("EURUSD")
         assert "EURUSD" in engine.pairs
+
+
+def test_strategy_config_requires_all_positive_finite_parameters():
+    good = StrategyConfig("momentum", {
+        "fast_ema_period": 3, "slow_ema_period": 5,
+        "min_ema_spread": D("0.1"), "min_velocity": D("0.1"),
+        "velocity_lookback": 2, "signal_quality_threshold": D("0.5"),
+    })
+    assert good.is_active
+    assert not validate_strategy_parameters("momentum", {
+        **good.parameters, "slow_ema_period": 2,
+    })
+    assert not validate_strategy_parameters("momentum", {
+        **good.parameters, "min_velocity": D("NaN"),
+    })
+    assert not StrategyConfig("breakout", {}).is_active
+
+
+def test_feature_computation_uses_mid_ema_and_prior_only_channel():
+    config = StrategyConfig("momentum", {
+        "fast_ema_period": 2, "slow_ema_period": 3,
+        "min_ema_spread": D("0.00001"), "min_velocity": D("0.00001"),
+        "velocity_lookback": 1, "signal_quality_threshold": D("0.5"),
+    })
+    breakout = StrategyConfig("breakout", {
+        "channel_lookback": 2, "min_channel_width": D("0.0001"),
+        "breakout_margin": D("0.0001"), "signal_quality_threshold": D("0.5"),
+    })
+    computer = FeatureComputer()
+    values = [("1.0", "1.0002"), ("1.1", "1.1002"), ("1.2", "1.2002")]
+    for i, (bid, ask) in enumerate(values):
+        snap = computer.compute("EURUSD", _tick(bid, ask, (i + 1) * 1000, i + 1),
+                                {"momentum": config, "breakout": breakout})
+    assert snap.mid_price == D("1.2001")
+    assert snap.fast_ema is not None and snap.slow_ema is not None
+    assert snap.fast_ema > snap.slow_ema
+    # channel excludes the current candidate quote
+    assert snap.channel_high == D("1.1002")
+    assert snap.channel_low == D("1.0")
+    assert snap.price_velocity == D("0.1")
+
+
+def test_features_are_none_for_inactive_strategies_and_short_history():
+    computer = FeatureComputer()
+    snap = computer.compute("EURUSD", _tick("1.1", "1.1002"), {})
+    assert snap.mid_price == D("1.1001")
+    assert snap.fast_ema is None and snap.rolling_mean is None
+    assert snap.channel_high is None and snap.volatility is None
+
+
+def test_regime_classifier_fails_closed_without_complete_owner_thresholds():
+    computer = FeatureComputer()
+    snap = computer.compute("EURUSD", _tick("1.1", "1.1002"), {})
+    result = RegimeClassifier(RegimeClassifierConfig()).classify(snap, history_count=10)
+    assert result.regime is RegimeV2.UNKNOWN
+    assert not result.is_valid
+    assert not RegimeMap({}).is_configured
 
     def test_remove_pair(self):
         engine = StrategyEngine()

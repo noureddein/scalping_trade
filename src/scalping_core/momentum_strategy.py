@@ -12,6 +12,7 @@ from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal
 
+from .broker_types import Tick
 from .strategy_types import (
     MarketRegime,
     PricePoint,
@@ -19,6 +20,12 @@ from .strategy_types import (
     SignalDirection,
     StrategyType,
 )
+from .regime_types import (
+    FeatureSnapshot, MarketRegime as RecommendationRegime, NoSignalReason,
+    NoSignalReasonCode, SignalDirection as RecommendationDirection,
+    SignalRecommendation, StrategyConfig, stable_signal_id, strategy_config_issue,
+)
+from .strategy_engine import Strategy
 
 _ZERO = Decimal(0)
 
@@ -134,3 +141,45 @@ class MomentumStrategy:
         for v in values[1:]:
             ema = alpha * v + (1 - alpha) * ema
         return ema
+
+
+class MomentumRecommendationStrategy(Strategy):
+    """Stateless Phase 4 momentum evaluator over the shared feature contract."""
+
+    strategy_name = "momentum"
+
+    def __init__(self, config: StrategyConfig | None = None) -> None:
+        self.config = config
+
+    def evaluate(self, pair: str, tick: Tick, features: FeatureSnapshot,
+                 regime: RecommendationRegime) -> SignalRecommendation | NoSignalReason:
+        from datetime import timezone
+
+        timestamp = features.timestamp
+        issue = strategy_config_issue(self.config, self.strategy_name)
+        if issue is not None:
+            return NoSignalReason(pair, issue, "Momentum strategy parameters are absent or invalid", timestamp)
+        if (features.ema_spread is None or features.price_velocity is None
+                or features.fast_ema is None or features.slow_ema is None):
+            return NoSignalReason(pair, NoSignalReasonCode.INSUFFICIENT_HISTORY,
+                                  "Momentum features are not ready", timestamp)
+        params = self.config.parameters
+        min_spread = params["min_ema_spread"]
+        min_velocity = params["min_velocity"]
+        spread = features.ema_spread
+        velocity = features.price_velocity
+        if abs(spread) < min_spread or abs(velocity) < min_velocity or spread == 0:
+            return NoSignalReason(pair, NoSignalReasonCode.NO_SIGNAL_CONDITIONS,
+                                  "EMA alignment or velocity is below its configured threshold", timestamp)
+        if (spread > 0) != (velocity > 0):
+            return NoSignalReason(pair, NoSignalReasonCode.NO_SIGNAL_CONDITIONS,
+                                  "EMA direction and velocity disagree", timestamp)
+        direction = RecommendationDirection.BUY if spread > 0 else RecommendationDirection.SELL
+        strength = min(Decimal(1), abs(spread) / min_spread * abs(velocity) / min_velocity)
+        return SignalRecommendation(
+            pair=pair, direction=direction, strategy_name=self.strategy_name, regime=regime,
+            reference_bid=tick.bid, reference_ask=tick.ask, features=features,
+            strength=strength, timestamp=timestamp,
+            signal_id=stable_signal_id(pair, timestamp.astimezone(timezone.utc),
+                                       self.strategy_name, direction, tick.bid, tick.ask),
+        )

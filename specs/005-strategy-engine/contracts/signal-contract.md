@@ -13,7 +13,7 @@ recommendation contains:
 
 ```json
 {
-  "signal_id": "uuid-v4",
+  "signal_id": "uuid-v5",
   "pair": "EURUSD",
   "direction": "BUY",
   "strategy_name": "momentum",
@@ -35,7 +35,7 @@ recommendation contains:
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| signal_id | string | Yes | Unique identifier for tracking/correlation |
+| signal_id | string | Yes | Deterministic UUID v5 for tracking/correlation; identical recommendation inputs produce the same ID |
 | pair | string | Yes | Canonical symbol name |
 | direction | enum | Yes | BUY or SELL |
 | strategy_name | string | Yes | "momentum", "breakout", or "meanrev" |
@@ -77,8 +77,8 @@ When evaluation produces no signal, a structured reason is logged:
 1. Every SignalRecommendation passes quality validation before emission.
 2. The features snapshot reflects the exact indicator state at decision
    time — no look-ahead.
-3. Identical input and configuration produce identical signals
-   (deterministic).
+3. Identical input and configuration produce identical signals,
+   including the deterministic UUID v5 identifier.
 4. The strategy engine never calls order APIs, modifies positions, or
    changes account state.
 5. With no parameters configured, zero signals are produced.

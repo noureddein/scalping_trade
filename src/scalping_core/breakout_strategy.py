@@ -12,6 +12,13 @@ from collections import deque
 from dataclasses import dataclass
 from decimal import Decimal
 
+from .broker_types import Tick
+from .regime_types import (
+    FeatureSnapshot, MarketRegime as RecommendationRegime, NoSignalReason,
+    NoSignalReasonCode, SignalDirection as RecommendationDirection,
+    SignalRecommendation, StrategyConfig, stable_signal_id, strategy_config_issue,
+)
+from .strategy_engine import Strategy
 from .strategy_types import (
     MarketRegime,
     PricePoint,
@@ -123,3 +130,55 @@ class BreakoutStrategy:
         if ch_width <= 0:
             return _ZERO
         return min(distance / ch_width, Decimal(1))
+
+
+class BreakoutRecommendationStrategy(Strategy):
+    """Stateless Phase 4 breakout evaluator using prior-only channels."""
+
+    strategy_name = "breakout"
+
+    def __init__(self, config: StrategyConfig | None = None) -> None:
+        self.config = config
+
+    def evaluate(self, pair: str, tick: Tick, features: FeatureSnapshot,
+                 regime: RecommendationRegime) -> SignalRecommendation | NoSignalReason:
+        issue = strategy_config_issue(self.config, self.strategy_name)
+        if issue is not None:
+            return NoSignalReason(pair, issue, "Breakout strategy parameters are absent or invalid", features.timestamp)
+        if (features.channel_high is None or features.channel_low is None
+                or features.channel_width is None):
+            return NoSignalReason(pair, NoSignalReasonCode.INSUFFICIENT_HISTORY,
+                                  "Prior breakout channel is not ready", features.timestamp)
+        params = self.config.parameters
+        if features.channel_width < params["min_channel_width"]:
+            return NoSignalReason(pair, NoSignalReasonCode.CHANNEL_TOO_NARROW,
+                                  "Prior channel is narrower than its configured minimum", features.timestamp)
+        margin = params["breakout_margin"]
+        upper_distance = features.mid_price - features.channel_high
+        lower_distance = features.channel_low - features.mid_price
+        direction: RecommendationDirection
+        distance: Decimal
+        if upper_distance > margin:
+            direction, distance = RecommendationDirection.BUY, upper_distance
+        elif lower_distance > margin:
+            direction, distance = RecommendationDirection.SELL, lower_distance
+        else:
+            return NoSignalReason(pair, NoSignalReasonCode.NO_SIGNAL_CONDITIONS,
+                                  "Price has not exceeded the prior channel by its margin", features.timestamp)
+
+        spread_now = tick.ask - tick.bid
+        if (features.previous_mid_price is not None and features.previous_spread is not None
+                and spread_now > features.previous_spread):
+            mid_move = abs(features.mid_price - features.previous_mid_price)
+            spread_widening = spread_now - features.previous_spread
+            if mid_move <= spread_widening / 2:
+                return NoSignalReason(pair, NoSignalReasonCode.SPREAD_ONLY_BREAKOUT,
+                                      "The apparent move is fully explained by spread widening", features.timestamp)
+        strength = min(Decimal(1), distance / margin)
+        return SignalRecommendation(
+            pair=pair, direction=direction, strategy_name=self.strategy_name, regime=regime,
+            reference_bid=tick.bid, reference_ask=tick.ask, features=features,
+            strength=strength, timestamp=features.timestamp,
+            signal_id=stable_signal_id(pair, features.timestamp, self.strategy_name,
+                                       direction, tick.bid, tick.ask),
+        )
