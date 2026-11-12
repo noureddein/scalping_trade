@@ -574,6 +574,52 @@ class TcpBrokerAdapter(BrokerAdapter):
             raise ValueError("broker_symbol must be a non-empty string")
         return self.send_request("get_contracts", {"symbol": broker_symbol})
 
+    def submit_order(
+        self,
+        *,
+        canonical_pair: str,
+        broker_symbol: str,
+        side: str,
+        volume_lots: str,
+        stop_loss_price: str,
+        take_profit_price: str | None = None,
+        idempotency_key: str,
+        signal_timestamp_ms: int,
+        fresh_quote_bid: str,
+        fresh_quote_ask: str,
+        fresh_quote_time_ms: int,
+    ) -> bool:
+        """Submit an order request to DemoOrderHandler.mq5.
+
+        Verifies account type is Demo before sending. Returns False if:
+        - No client connected
+        - Account is not Demo (fail-closed)
+        - Request send fails
+
+        The EA (DemoOrderHandler.mq5) will:
+        1. Verify account type is Demo (broker-reported, not self-reported)
+        2. Verify connected account matches Demo scope approval
+        3. Submit to Demo broker via MT5 trade functions
+        4. Return OrderResult (fill/reject/timeout)
+        """
+        if self._account_info is None or self._account_info.account_type != "demo":
+            return False
+
+        params = {
+            "canonical_pair": canonical_pair,
+            "broker_symbol": broker_symbol,
+            "side": side,
+            "volume_lots": str(volume_lots),
+            "stop_loss_price": str(stop_loss_price),
+            "take_profit_price": str(take_profit_price) if take_profit_price else None,
+            "idempotency_key": idempotency_key,
+            "signal_timestamp_ms": signal_timestamp_ms,
+            "fresh_quote_bid": str(fresh_quote_bid),
+            "fresh_quote_ask": str(fresh_quote_ask),
+            "fresh_quote_time_ms": fresh_quote_time_ms,
+        }
+        return self.send_request("submit_order", params)
+
 
 def _parse_account_info(data: dict) -> AccountInfo | None:
     try:
