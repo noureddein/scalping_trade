@@ -84,7 +84,7 @@ mql5/
 └── DemoOrderHandler.mq5      # NEW: Demo-only order handler (requires owner approval)
 
 src/
-├── scalping/
+├── scalping_core/
 │   ├── demo/
 │   │   ├── scope.py          # Demo scope approval gate
 │   │   ├── evidence.py       # Complete event recording
@@ -97,7 +97,7 @@ tests/
 └── test_demo_report.py
 
 migrations/
-└── 009_demo_forward_test.sql
+└── 011_demo_forward_test.sql
 ```
 
 **Structure Decision**: Minimal additions — `demo/` subpackage for

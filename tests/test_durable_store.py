@@ -18,10 +18,10 @@ def test_migration_runner_discovers_all_sequential_migrations():
         "postgresql://localhost/scalping_test", ROOT / "migrations", "scalping_test",
     )
     migrations = runner.discover()
-    assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    assert [migration.version for migration in runner.pending(set())] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
-    assert [migration.version for migration in runner.pending({1, 2, 3, 4, 5, 6, 7, 8, 9})] == [10]
-    assert runner.pending({1, 2, 3, 4, 5, 6, 7, 8, 9, 10}) == ()
+    assert [migration.version for migration in migrations] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    assert [migration.version for migration in runner.pending(set())] == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    assert [migration.version for migration in runner.pending({1, 2, 3, 4, 5, 6, 7, 8, 9, 10})] == [11]
+    assert runner.pending({1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}) == ()
 
 
 def test_migration_runner_rejects_non_disposable_database_before_connecting():
@@ -55,5 +55,5 @@ def test_apply_and_upgrade_migrations_on_explicit_disposable_database():
         conn.execute("CREATE SCHEMA public")
     runner = MigrationRunner(_DISPOSABLE_URL, ROOT / "migrations", database)
     applied = runner.apply()
-    assert set(applied) == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+    assert set(applied) == {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}
     assert runner.apply() == ()

@@ -12,10 +12,10 @@ must exist before any order is submitted.
 | Field | Type | Constraints |
 |-------|------|-------------|
 | approval_id | uuid | PK |
-| account_id | string | FK to TradingAccount; NOT NULL |
+| account_id | string | Account identifier; NOT NULL |
 | account_type | string | Must be "DEMO"; NOT NULL; CHECK |
-| approved_pair | string | FK to CanonicalSymbol; NOT NULL |
-| approved_lot_size | decimal | Must match pilot lot (0.01); NOT NULL |
+| approved_pair | string | Canonical pair name (e.g. EURUSD); NOT NULL |
+| approved_lot_size | decimal | Owner-defined lot size; NOT NULL |
 | start_time | timestamp | When approval becomes active; NOT NULL |
 | end_time | timestamp | When approval expires; NOT NULL |
 | stop_conditions | string | JSON stop criteria; NOT NULL |
@@ -65,7 +65,7 @@ trading. Separate from RiskEvent to prevent table bloat.
 | session_id | uuid | FK to ForwardTestSession; NOT NULL |
 | event_type | enum | See event types below; NOT NULL |
 | timestamp | timestamp | When event occurred; NOT NULL |
-| pair | string | FK to CanonicalSymbol; NOT NULL |
+| pair | string | Canonical pair name; NOT NULL |
 | detail | string | JSON structured detail; NOT NULL |
 | related_intent_id | uuid | FK to OrderIntent; nullable |
 | related_signal_id | uuid | Nullable |
@@ -137,6 +137,6 @@ OrderIntent (Phase 5) 1──0..1 ExecutionDiscrepancy
   into Phase 7 backtest calibration.
 - Migration 009 adds these tables. It does not modify existing
   Phase 2–7 tables.
-- The ForwardTestReport always includes statistical_warnings. An
-  empty array means no warnings — but the "results do not authorize
-  live trading" disclaimer is always present in the report text.
+- The ForwardTestReport.statistical_warnings array is never empty —
+  it always includes at minimum "These results do not authorize live
+  trading." Additional warnings are appended as applicable.
