@@ -13,7 +13,7 @@ exist before any backtest runs.
 |-------|------|-------------|
 | source_id | uuid | PK |
 | provider | string | Data provider name; NOT NULL |
-| pair | string | FK to CanonicalSymbol; NOT NULL |
+| pair | string | Canonical pair name (e.g. EURUSD); NOT NULL |
 | interval_type | string | "real_tick" or "generated"; NOT NULL |
 | timezone | string | IANA timezone of timestamps; NOT NULL |
 | quality_score | decimal | Owner-assessed quality metric; NOT NULL |
@@ -32,7 +32,7 @@ A specific file of historical tick data with frozen hash.
 | source_id | uuid | FK to ApprovedDataSource; NOT NULL |
 | file_path | string | Path to tick data file; NOT NULL |
 | file_hash | string | SHA-256 of file contents; NOT NULL; UNIQUE |
-| pair | string | FK to CanonicalSymbol; NOT NULL |
+| pair | string | Canonical pair name; NOT NULL |
 | start_time | timestamp | First tick timestamp; NOT NULL |
 | end_time | timestamp | Last tick timestamp; NOT NULL |
 | tick_count | integer | Total ticks in file; NOT NULL |
@@ -105,7 +105,7 @@ Configuration for execution cost accounting per pair/broker.
 | Field | Type | Constraints |
 |-------|------|-------------|
 | config_id | uuid | PK |
-| pair | string | FK to CanonicalSymbol; NOT NULL |
+| pair | string | Canonical pair name; NOT NULL |
 | commission_per_lot | decimal | NOT NULL |
 | swap_long_per_lot | decimal | Per overnight hold; NOT NULL |
 | swap_short_per_lot | decimal | Per overnight hold; NOT NULL |
@@ -144,7 +144,7 @@ HistoricalDataset 1──* BacktestRun
 BacktestRun 1──1 BacktestReport
 BacktestRun 1──1 TriedConfiguration
 AcceptanceCriteria 0..1──* BacktestReport
-CostModelConfig *──1 CanonicalSymbol (Phase 2)
+CostModelConfig *──1 pair (TEXT, canonical pair name)
 ```
 
 ## Notes
@@ -156,7 +156,7 @@ CostModelConfig *──1 CanonicalSymbol (Phase 2)
 - All hashes are SHA-256. Dataset hash covers raw file bytes; code
   hash covers relevant Python source; configuration hash covers
   sorted JSON of all parameters.
-- Migration 008 adds these tables. It does not modify existing
+- Migration 010 adds these tables. It does not modify existing
   Phase 2–6 tables.
 - The exit policy version in BacktestRun references the
   owner-approved policy (§19#18). Until approved, strategy

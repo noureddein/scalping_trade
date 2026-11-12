@@ -33,7 +33,12 @@ data only after §19#9 approval
 Replay speed is bounded by I/O and pipeline computation.
 
 **Constraints**: Deterministic (no randomness, no system clock, no
-floating-point non-determinism). Same input = same output.
+floating-point non-determinism). Same input = same output. All P/L
+and cost arithmetic MUST use `Decimal`, not `float`. Phase 3–5
+pipeline components that use `float` for spread/strategy calculations
+are acceptable only if the replay engine feeds identical inputs —
+determinism is guaranteed by identical input ordering and identical
+Decimal cost accounting, not by replacing all floats in existing code.
 
 **Scale/Scope**: Single pair pilot; dataset size depends on §19#9
 approval. Walk-forward windows scale with dataset length.
@@ -73,7 +78,7 @@ specs/008-backtesting/
 
 ```text
 src/
-├── scalping/
+├── scalping_core/
 │   ├── backtest/
 │   │   ├── replay.py          # Deterministic tick replay engine
 │   │   ├── cost_model.py      # Execution cost accounting
@@ -95,9 +100,18 @@ tests/
 └── test_report.py
 
 migrations/
-└── 008_backtest_tables.sql
+└── 010_backtest_tables.sql
 ```
 
 **Structure Decision**: Single project with a `backtest/` subpackage
-under `src/scalping/`. The replay harness wraps the existing Phase
+under `src/scalping_core/`. The replay harness wraps the existing Phase
 3–5 pipeline — it does not create parallel implementations.
+
+**Sampling Basis (§19#16)**: The replay harness operates on raw ticks
+regardless of sampling. §19#16 (sampling basis) is resolved by the
+strategy engine configuration, not a separate backtest gate. The
+strategy engine's indicator timeframe setting (configured per strategy
+by the owner) determines how raw ticks are aggregated. The gate
+validation in replay.py checks that the strategy configuration is
+complete (which includes the sampling/timeframe setting) before
+replay begins. No separate sampling-basis gate entity is needed.
