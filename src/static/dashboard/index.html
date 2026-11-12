@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Scalping Dashboard</title>
+<style>
+  :root { --bg: #1a1a2e; --surface: #16213e; --border: #0f3460; --text: #e6e6e6; --muted: #888; --green: #00c853; --red: #ff1744; --amber: #ffc107; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); padding: 1rem; }
+  h1 { font-size: 1.4rem; margin-bottom: 1rem; }
+  .banner { padding: 0.5rem 1rem; border-radius: 4px; margin-bottom: 1rem; font-weight: 600; display: none; }
+  .banner.disconnected { display: block; background: var(--red); color: #fff; }
+  .banner.stale { display: block; background: var(--amber); color: #000; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 0.75rem; margin-bottom: 1.5rem; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem; }
+  .card .label { font-size: 0.75rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+  .card .value { font-size: 1.25rem; font-weight: 600; margin-top: 0.25rem; }
+  .card .value.positive { color: var(--green); }
+  .card .value.negative { color: var(--red); }
+  .card .value.locked { color: var(--amber); }
+  .card.stale { opacity: 0.5; }
+  section { margin-bottom: 1.5rem; }
+  section h2 { font-size: 1.1rem; margin-bottom: 0.75rem; border-bottom: 1px solid var(--border); padding-bottom: 0.25rem; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th, td { padding: 0.4rem 0.6rem; text-align: left; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 0.7rem; }
+  .btn { padding: 0.5rem 1rem; border: none; border-radius: 4px; cursor: pointer; font-weight: 600; }
+  .btn-danger { background: var(--red); color: #fff; }
+  .btn-danger:disabled { opacity: 0.4; cursor: not-allowed; }
+  .empty { color: var(--muted); font-style: italic; padding: 1rem 0; }
+</style>
+</head>
+<body>
+<div id="conn-banner" class="banner">Disconnected — data may be stale</div>
+<h1>Scalping Dashboard</h1>
+
+<section id="overview-section">
+  <h2>Overview</h2>
+  <div class="grid" id="overview-grid"></div>
+</section>
+
+<section id="positions-section">
+  <h2>Open Positions</h2>
+  <table id="positions-table">
+    <thead><tr>
+      <th>Pair</th><th>Dir</th><th>Entry</th><th>Current</th><th>Lots</th>
+      <th>Float P/L</th><th>SL</th><th>TP</th><th>Duration</th><th>Strategy</th><th>Status</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+  <div class="empty" id="positions-empty">No open positions</div>
+</section>
+
+<section id="pairs-section">
+  <h2>Pairs</h2>
+  <table id="pairs-table">
+    <thead><tr>
+      <th>Pair</th><th>Broker</th><th>Enabled</th><th>Spread</th>
+      <th>Avg</th><th>Max</th><th>Status</th><th>Position</th><th>Permission</th>
+    </tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<section>
+  <h2>Emergency Stop</h2>
+  <button class="btn btn-danger" id="emergency-btn" onclick="emergencyStop()">
+    EMERGENCY STOP
+  </button>
+</section>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let connected = false;
+let stale = false;
+let evtSource = null;
+
+const overviewFields = [
+  {key:'trading_status', label:'Trading Status'},
+  {key:'broker_name', label:'Broker'},
+  {key:'account_id', label:'Account'},
+  {key:'daily_net_pnl', label:'Daily Net P/L', pnl:true},
+  {key:'daily_profit_limit', label:'Profit Limit'},
+  {key:'daily_loss_limit', label:'Loss Limit'},
+  {key:'open_positions_count', label:'Open Positions'},
+  {key:'trades_today', label:'Trades Today'},
+  {key:'win_count', label:'Wins'},
+  {key:'loss_count', label:'Losses'},
+  {key:'total_spread_costs', label:'Spread Costs'},
+  {key:'account_equity', label:'Account Equity'},
+];
+
+function initOverview() {
+  const grid = $('#overview-grid');
+  grid.innerHTML = '';
+  for (const f of overviewFields) {
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.id = 'ov-' + f.key;
+    card.innerHTML = `<div class="label">${f.label}</div><div class="value" id="ov-val-${f.key}">—</div>`;
+    grid.appendChild(card);
+  }
+}
+
+function updateOverview(data) {
+  for (const f of overviewFields) {
+    const el = document.getElementById('ov-val-' + f.key);
+    if (!el) continue;
+    const v = data[f.key];
+    el.textContent = v != null ? v : '—';
+    el.className = 'value';
+    if (f.pnl && v != null) {
+      const n = parseFloat(v);
+      if (n > 0) el.classList.add('positive');
+      else if (n < 0) el.classList.add('negative');
+    }
+    if (f.key === 'trading_status' && v && (v.includes('LOCKED') || v === 'DRAINING'))
+      el.classList.add('locked');
+  }
+  setStale(false);
+}
+
+function updatePositions(positions) {
+  const tbody = $('#positions-table tbody');
+  const empty = $('#positions-empty');
+  if (!positions || positions.length === 0) {
+    tbody.innerHTML = '';
+    empty.style.display = 'block';
+    return;
+  }
+  empty.style.display = 'none';
+  tbody.innerHTML = positions.map(p => `<tr>
+    <td>${p.pair||''}</td><td>${p.direction||''}</td><td>${p.entry_price||''}</td>
+    <td>${p.current_price||''}</td><td>${p.lot_size||''}</td>
+    <td class="${parseFloat(p.floating_pnl||0)>=0?'positive':'negative'}">${p.floating_pnl||'0'}</td>
+    <td>${p.stop_loss||''}</td><td>${p.take_profit||''}</td>
+    <td>${p.holding_duration||''}</td><td>${p.strategy||''}</td><td>${p.exit_status||''}</td>
+  </tr>`).join('');
+}
+
+function updatePairs(pairs) {
+  const tbody = $('#pairs-table tbody');
+  if (!pairs || pairs.length === 0) { tbody.innerHTML = ''; return; }
+  tbody.innerHTML = pairs.map(p => `<tr>
+    <td>${p.canonical_pair||''}</td><td>${p.broker_symbol||''}</td>
+    <td>${p.trading_enabled?'Yes':'No'}</td><td>${p.current_spread||''}</td>
+    <td>${p.average_spread||''}</td><td>${p.maximum_spread||''}</td>
+    <td>${p.spread_status||''}</td><td>${p.active_position?'Yes':'—'}</td>
+    <td>${p.trading_permission?'Allowed':'Blocked'}</td>
+  </tr>`).join('');
+}
+
+function setConnected(c) {
+  connected = c;
+  const b = $('#conn-banner');
+  if (!c) { b.className = 'banner disconnected'; b.textContent = 'Disconnected — data may be stale'; }
+  else { b.className = 'banner'; }
+  $('#emergency-btn').disabled = !c;
+}
+
+function setStale(s) {
+  stale = s;
+  const b = $('#conn-banner');
+  if (s && connected) { b.className = 'banner stale'; b.textContent = 'Reconnecting — data may be stale'; }
+  document.querySelectorAll('.card').forEach(c => s ? c.classList.add('stale') : c.classList.remove('stale'));
+}
+
+function connectSSE() {
+  if (evtSource) { try { evtSource.close(); } catch(e){} }
+  evtSource = new EventSource('/api/stream');
+  evtSource.onopen = () => setConnected(true);
+  evtSource.onerror = () => { setConnected(false); setStale(true); };
+  evtSource.addEventListener('overview', (e) => { try { updateOverview(JSON.parse(e.data)); } catch(err){} });
+  evtSource.addEventListener('position', (e) => { try { updatePositions(JSON.parse(e.data)); } catch(err){} });
+  evtSource.addEventListener('pair-update', (e) => { loadPairs(); });
+  evtSource.addEventListener('spread', (e) => {});
+  evtSource.addEventListener('risk-state', (e) => { loadOverview(); });
+}
+
+async function loadOverview() {
+  try {
+    const r = await fetch('/api/overview');
+    if (r.ok) updateOverview(await r.json());
+  } catch(e) {}
+}
+
+async function loadPositions() {
+  try {
+    const r = await fetch('/api/positions');
+    if (r.ok) updatePositions(await r.json());
+  } catch(e) {}
+}
+
+async function loadPairs() {
+  try {
+    const r = await fetch('/api/pairs');
+    if (r.ok) updatePairs(await r.json());
+  } catch(e) {}
+}
+
+async function emergencyStop() {
+  if (!confirm('Activate EMERGENCY STOP? This will block all new entries.')) return;
+  try {
+    const r = await fetch('/api/emergency-stop', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({confirm:true})
+    });
+    const data = await r.json();
+    if (r.ok) { alert('Emergency stop activated: ' + (data.state||'DRAINING')); loadOverview(); }
+    else alert('Error: ' + (data.error||'unknown'));
+  } catch(e) { alert('Failed: ' + e.message); }
+}
+
+initOverview();
+loadOverview();
+loadPositions();
+loadPairs();
+connectSSE();
+</script>
+</body>
+</html>

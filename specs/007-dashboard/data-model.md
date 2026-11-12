@@ -29,8 +29,8 @@ Not a persisted entity — composed at query time from existing Phase
 | Field | Source |
 |-------|--------|
 | trading_status | Backend connection state + daily risk state |
-| broker_name | TradingAccount (Phase 2) |
-| account_id | TradingAccount (Phase 2) |
+| broker_name | AccountInfo.broker_name (Phase 2, broker_types.py) |
+| account_id | AccountInfo.login (Phase 2, broker_types.py) |
 | daily_net_pnl | DailyRiskState.net_pnl (Phase 5) |
 | daily_profit_limit | DailyRiskState.profit_limit (Phase 5) |
 | daily_loss_limit | DailyRiskState.loss_limit (Phase 5) |
@@ -39,7 +39,7 @@ Not a persisted entity — composed at query time from existing Phase
 | win_count | Positions with realized_pnl > 0 today (Phase 5) |
 | loss_count | Positions with realized_pnl <= 0 today (Phase 5) |
 | total_spread_costs | Sum of spread costs today (Phase 3 metrics) |
-| account_equity | Latest equity from broker (Phase 2) |
+| account_equity | AccountInfo.equity (Phase 2, broker_types.py) |
 
 ### PairView (read-only view)
 
@@ -53,9 +53,9 @@ Per-pair display data composed from existing tables.
 | current_spread | SpreadSnapshot.spread (Phase 3) |
 | average_spread | SpreadStatistics.mean (Phase 3) |
 | maximum_spread | SpreadStatistics.max (Phase 3) |
-| spread_status | SpreadGate status (Phase 3) |
+| spread_status | SpreadSnapshot.stability_state (Phase 3, spread_engine.py) |
 | active_position | Position where status=OPEN for this pair (Phase 5) |
-| trading_permission | Combined spread gate + risk state + regime |
+| trading_permission | SpreadSnapshot.entry_eligible + RiskState + regime (combined) |
 
 ### SpreadMonitorView (read-only view)
 
@@ -66,12 +66,12 @@ Per-pair live spread monitoring data.
 | current_spread | SpreadSnapshot.spread (Phase 3) |
 | average_spread | SpreadStatistics.mean (Phase 3) |
 | maximum_spread | SpreadStatistics.max (Phase 3) |
-| spread_trend | Derived from rolling spread direction (Phase 3) |
-| spread_volatility | SpreadStatistics.stddev (Phase 3) |
-| manual_threshold | SpreadGate manual threshold (Phase 3) |
-| dynamic_threshold | SpreadGate adaptive threshold (Phase 3) |
-| stability_timer | MarketHealthState timer (Phase 3) |
-| trading_permission | SpreadGate pass/fail (Phase 3) |
+| spread_trend | SpreadSnapshot.trend (Phase 3, spread_engine.py) |
+| spread_volatility | SpreadSnapshot.volatility property → stddev_pips (Phase 3) |
+| manual_threshold | SpreadConfig.manual_max_spread (Phase 3, spread_engine.py) |
+| dynamic_threshold | SpreadConfig.adaptive_threshold (Phase 3, spread_engine.py) |
+| stability_timer | MarketHealthState timer (Phase 3, market_data.py) |
+| trading_permission | SpreadSnapshot.entry_eligible (Phase 3, spread_engine.py) |
 
 ### PositionView (read-only view)
 

@@ -218,8 +218,10 @@ transitions to DRAINING and all new entries are blocked.
   pairs.
 - **FR-003**: The dashboard MUST display all 9 live spread monitor
   fields from §13.3 with near real-time updates.
-- **FR-004**: The dashboard MUST allow modification of all 8 risk
-  control parameters from §13.4 with validation and audit logging.
+- **FR-004**: The dashboard MUST display all 8 risk control parameters
+  from §13.4, of which 6 are editable (lot_size and trading_schedule
+  are read-only for pilot), with validation and audit logging for
+  editable parameters.
 - **FR-005**: The dashboard MUST display all 11 position fields from
   §13.5 with near real-time updates.
 - **FR-006**: The dashboard MUST provide access to the 7 additional
