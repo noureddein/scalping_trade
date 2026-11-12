@@ -97,7 +97,7 @@ After each walk-forward run, the leakage checker verifies:
    future information across period boundaries.
 
 **Verification method**: Inject a known future tick into the buffer
-at a random point. If the strategy output changes, leakage is
+at a predetermined point. If the strategy output changes, leakage is
 confirmed. If it doesn't change, the check passes.
 
 ## Consumer/Producer Obligations
