@@ -36,6 +36,18 @@ for pilot
 
 **Scale/Scope**: One operator, one account, single-pair pilot
 
+### Internal State Notification
+
+The dashboard runs in the same Python process as the backend, sharing
+the asyncio event loop. State changes are propagated via an in-process
+asyncio event bus (a simple `dict[str, list[asyncio.Queue]]` keyed by
+event type). Backend modules (daily_risk, position_manager,
+spread_engine) emit events on state change; the SSE live_feed module
+subscribes and pushes to connected clients.
+
+This avoids polling. If the dashboard later moves to a separate process,
+replace the in-process bus with PostgreSQL LISTEN/NOTIFY.
+
 ## Constitution Check
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
@@ -71,8 +83,9 @@ specs/007-dashboard/
 
 ```text
 src/
-├── scalping/
+├── scalping_core/
 │   ├── dashboard/
+│   │   ├── __init__.py
 │   │   ├── api.py            # HTTP API endpoints
 │   │   ├── live_feed.py      # Server-sent events for live updates
 │   │   ├── audit_log.py      # Configuration change audit logging
@@ -90,5 +103,5 @@ tests/
 ```
 
 **Structure Decision**: Single project with a `dashboard/` subpackage
-under `src/scalping/`. Frontend is a lightweight static HTML/JS app
+under `src/scalping_core/`. Frontend is a lightweight static HTML/JS app
 served by the same Python process. No separate frontend build step.
