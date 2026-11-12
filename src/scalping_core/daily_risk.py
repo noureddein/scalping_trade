@@ -12,7 +12,10 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from zoneinfo import ZoneInfo
+from uuid import uuid4
 
+from .broker_types import ContractSpec
+from .order_types import RiskEvent, RiskEventType
 from .risk_gate import RiskState
 
 
@@ -148,3 +151,113 @@ def reset_state(
     if not is_new_trading_day(current_day, utc_now):
         return RiskState.LOSS_LOCKED
     return RiskState.ACTIVE
+
+
+def operator_transition(
+    state: RiskState, target: RiskState, *, account_id: str,
+    operator_id: str | None, at: datetime,
+) -> tuple[RiskState, RiskEvent]:
+    """Apply an auditable operator-only state transition.
+
+    The caller must persist the returned event and risk state atomically.
+    This pure helper does not claim that an operator identity was
+    authenticated; authorization remains the caller's responsibility.
+    """
+    if at.tzinfo is None or at.utcoffset() is None:
+        raise ValueError("operator transition timestamp must be timezone-aware")
+    if not account_id or not operator_id or not operator_id.strip():
+        raise ValueError("account_id and operator_id are required")
+    allowed = (
+        state is RiskState.ACTIVE and target in {RiskState.DRAINING, RiskState.DISABLED}
+    ) or (
+        state in {RiskState.DRAINING, RiskState.DISABLED,
+                  RiskState.PROFIT_LOCKED, RiskState.LOSS_LOCKED}
+        and target is RiskState.ACTIVE
+    )
+    if not allowed:
+        raise ValueError(f"operator transition {state.value} -> {target.value} is not permitted")
+    event = RiskEvent(
+        event_id=uuid4(), account_id=account_id,
+        event_type=RiskEventType.LOCK_RESET if target is RiskState.ACTIVE
+        else RiskEventType.LOCK_ACTIVATED,
+        detail=f"daily risk state changed {state.value} -> {target.value}",
+        related_intent_id=None, related_position_id=None,
+        operator_id=operator_id, created_at=at,
+    )
+    return target, event
+
+
+def calculate_floating_pnl_usd(
+    *, side: object, entry_price: Decimal, current_bid: Decimal,
+    current_ask: Decimal, lot_size: Decimal, contract: ContractSpec,
+    account_to_usd_rate: Decimal | None,
+) -> Decimal:
+    """Mark an open position at the exit-side quote using contract tick value.
+
+    Commissions and swaps remain separate daily P/L components to avoid
+    double-counting. Currency conversion must be supplied by its owner-
+    approved source; this function never invents one.
+    """
+    from .order_types import OrderSide
+
+    values = (entry_price, current_bid, current_ask, lot_size,
+              contract.tick_size, contract.tick_value)
+    if any(not isinstance(value, Decimal) or not value.is_finite() for value in values):
+        raise ValueError("floating P/L inputs must be finite Decimals")
+    if current_bid <= 0 or current_ask < current_bid or entry_price <= 0 or lot_size <= 0:
+        raise ValueError("floating P/L quote, entry, or volume is invalid")
+    if contract.tick_size <= 0 or contract.tick_value <= 0:
+        raise ValueError("contract tick value and size must be positive")
+    if (account_to_usd_rate is None or not isinstance(account_to_usd_rate, Decimal)
+            or not account_to_usd_rate.is_finite() or account_to_usd_rate <= 0):
+        raise ValueError("account currency conversion is unavailable or invalid")
+    mark = current_bid if side is OrderSide.BUY else current_ask if side is OrderSide.SELL else None
+    if mark is None:
+        raise ValueError("position side must be BUY or SELL")
+    move_in_ticks = (mark - entry_price) / contract.tick_size
+    if side is OrderSide.SELL:
+        move_in_ticks = -move_in_ticks
+    return move_in_ticks * contract.tick_value * lot_size * account_to_usd_rate
+
+
+class DailyRiskController:
+    """Persist daily P/L snapshots and state transitions through a store."""
+
+    def __init__(self, store: object, config: DailyRiskConfig | None = None) -> None:
+        self._store = store
+        self._config = config or DailyRiskConfig()
+
+    def update_pnl(
+        self, *, account_id: str, trading_day: date, current_state: RiskState,
+        pnl: DailyPnL, at: datetime,
+    ) -> RiskState:
+        if at.tzinfo is None or at.utcoffset() is None:
+            raise ValueError("risk update timestamp must be timezone-aware")
+        next_state = evaluate_state(current_state, pnl, self._config)
+        if next_state is current_state:
+            self._store.save_risk_snapshot(trading_day, next_state, pnl)
+            return next_state
+        event = RiskEvent(
+            event_id=uuid4(), account_id=account_id,
+            event_type=RiskEventType.LIMIT_TRIGGERED,
+            detail=f"daily net P/L {pnl.net_pnl_usd} changed state {current_state.value} -> {next_state.value}",
+            related_intent_id=None, related_position_id=None,
+            operator_id=None, created_at=at,
+        )
+        self._store.save_risk_transition(trading_day, next_state, pnl, event)
+        # FR-008: cancel local DRAFT/PENDING_SUBMIT intents on limit trigger
+        if hasattr(self._store, "cancel_cancellable_orders"):
+            self._store.cancel_cancellable_orders()
+        return next_state
+
+    def apply_operator_action(
+        self, *, account_id: str, trading_day: date, current_state: RiskState,
+        target_state: RiskState, pnl: DailyPnL, operator_id: str | None,
+        at: datetime,
+    ) -> RiskState:
+        next_state, event = operator_transition(
+            current_state, target_state, account_id=account_id,
+            operator_id=operator_id, at=at,
+        )
+        self._store.save_risk_transition(trading_day, next_state, pnl, event)
+        return next_state

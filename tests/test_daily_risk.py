@@ -20,8 +20,13 @@ from scalping_core.daily_risk import (
     is_new_trading_day,
     reset_state,
     trading_day,
+    operator_transition,
+    calculate_floating_pnl_usd,
+    DailyRiskController,
 )
 from scalping_core.risk_gate import RiskState
+from scalping_core.broker_types import ContractSpec
+from scalping_core.order_types import OrderSide
 
 
 # ---------------------------------------------------------------------------
@@ -340,3 +345,124 @@ class TestApprovedDisabledPolicy:
     def test_invalid_previous_state_fails_closed_to_disabled(self):
         dt = datetime(2026, 1, 15, 22, 0, tzinfo=UTC)
         assert reset_state(None, date(2026, 1, 15), dt) is RiskState.DISABLED
+
+
+def test_operator_transition_requires_identity_and_returns_audit_event():
+    at = datetime(2026, 11, 11, 12, tzinfo=UTC)
+    updated, event = operator_transition(
+        RiskState.ACTIVE, RiskState.DRAINING, account_id="acct",
+        operator_id="operator-1", at=at,
+    )
+    assert updated is RiskState.DRAINING
+    assert event.operator_id == "operator-1"
+    assert event.event_type.value == "LOCK_ACTIVATED"
+    with pytest.raises(ValueError, match="operator_id"):
+        operator_transition(RiskState.ACTIVE, RiskState.DISABLED,
+                            account_id="acct", operator_id=None, at=at)
+    with pytest.raises(ValueError, match="not permitted"):
+        operator_transition(RiskState.PROFIT_LOCKED, RiskState.DRAINING,
+                            account_id="acct", operator_id="operator-1", at=at)
+
+
+def test_manual_reactivation_of_draining_is_auditable():
+    updated, event = operator_transition(
+        RiskState.DRAINING, RiskState.ACTIVE, account_id="acct",
+        operator_id="operator-1", at=datetime(2026, 11, 11, 12, tzinfo=UTC),
+    )
+    assert updated is RiskState.ACTIVE
+    assert event.event_type.value == "LOCK_RESET"
+
+
+def test_floating_pnl_marks_buy_at_bid_and_sell_at_ask():
+    contract = ContractSpec(
+        broker_symbol="EURUSD", digits=4, point=Decimal("0.0001"),
+        tick_size=Decimal("0.0001"), tick_value=Decimal("10"),
+        contract_size=Decimal("100000"), volume_min=Decimal("0.01"),
+        volume_max=Decimal("100"), volume_step=Decimal("0.01"),
+        min_stop_distance=Decimal("0.0001"), trade_allowed=True,
+        margin_initial=None, commission_per_lot=None, swap_long=None, swap_short=None,
+    )
+    common = dict(entry_price=Decimal("1.1000"), current_bid=Decimal("1.1002"),
+                  current_ask=Decimal("1.1003"), lot_size=Decimal("0.01"),
+                  contract=contract, account_to_usd_rate=Decimal("1"))
+    assert calculate_floating_pnl_usd(side=OrderSide.BUY, **common) == Decimal("0.20")
+    assert calculate_floating_pnl_usd(side=OrderSide.SELL, **common) == Decimal("-0.30")
+
+
+def test_floating_pnl_requires_currency_conversion():
+    with pytest.raises(ValueError, match="conversion"):
+        calculate_floating_pnl_usd(
+            side=OrderSide.BUY, entry_price=Decimal("1.1"),
+            current_bid=Decimal("1.1"), current_ask=Decimal("1.1001"),
+            lot_size=Decimal("0.01"), contract=ContractSpec(
+                "EURUSD", 5, Decimal("0.00001"), Decimal("0.00001"), Decimal("1"),
+                Decimal("100000"), Decimal("0.01"), Decimal("100"),
+                Decimal("0.01"), Decimal("0.0001"), True, None, None, None, None,
+            ), account_to_usd_rate=None,
+        )
+
+
+def test_daily_risk_controller_persists_transition_with_audit_event():
+    class Store:
+        def __init__(self):
+            self.saved = None
+
+        def save_risk_transition(self, day, state, pnl, event):
+            self.saved = (day, state, pnl, event)
+
+        def save_risk_snapshot(self, day, state, pnl):
+            self.saved = (day, state, pnl, None)
+
+    store = Store()
+    controller = DailyRiskController(store)
+    at = datetime(2026, 11, 11, 12, tzinfo=UTC)
+    state = controller.update_pnl(
+        account_id="acct", trading_day=date(2026, 11, 11),
+        current_state=RiskState.ACTIVE, pnl=_pnl(realized=15), at=at,
+    )
+    assert state is RiskState.PROFIT_LOCKED
+    assert store.saved[1] is RiskState.PROFIT_LOCKED
+    assert store.saved[3].event_type.value == "LIMIT_TRIGGERED"
+
+    state = controller.apply_operator_action(
+        account_id="acct", trading_day=date(2026, 11, 11),
+        current_state=state, target_state=RiskState.ACTIVE,
+        pnl=_pnl(realized=15), operator_id="operator-1", at=at,
+    )
+    assert state is RiskState.ACTIVE
+    assert store.saved[3].operator_id == "operator-1"
+
+
+def test_limit_trigger_cancels_pending_intents():
+    """FR-008: DRAFT/PENDING_SUBMIT intents cancelled on limit trigger."""
+    class Store:
+        def __init__(self):
+            self.cancelled = 0
+
+        def save_risk_transition(self, day, state, pnl, event):
+            pass
+
+        def save_risk_snapshot(self, day, state, pnl):
+            pass
+
+        def cancel_cancellable_orders(self):
+            self.cancelled += 1
+            return 1
+
+    store = Store()
+    controller = DailyRiskController(store)
+    at = datetime(2026, 11, 11, 12, tzinfo=UTC)
+    # Trigger PROFIT_LOCKED
+    controller.update_pnl(
+        account_id="acct", trading_day=date(2026, 11, 11),
+        current_state=RiskState.ACTIVE, pnl=_pnl(realized=15), at=at,
+    )
+    assert store.cancelled == 1
+
+    # No state change = no cancel call
+    store.cancelled = 0
+    controller.update_pnl(
+        account_id="acct", trading_day=date(2026, 11, 11),
+        current_state=RiskState.PROFIT_LOCKED, pnl=_pnl(realized=15), at=at,
+    )
+    assert store.cancelled == 0

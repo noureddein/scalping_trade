@@ -24,6 +24,9 @@ from .daily_risk import (
     is_new_trading_day,
     reset_state,
     trading_day,
+    DailyRiskController,
+    calculate_floating_pnl_usd,
+    operator_transition,
 )
 from .risk_gate import (
     FOREX_CURRENCIES,
@@ -31,6 +34,8 @@ from .risk_gate import (
     EntryDecision,
     RiskState,
     evaluate_entry,
+    estimate_position_loss,
+    PositionLossEstimate,
 )
 from .market_data import (
     BatchResult,
@@ -87,6 +92,11 @@ from .regime_types import (
     StrategyConfig,
 )
 from .order_types import (
+    BarrierStatus,
+    DailyRiskState as PersistedDailyRiskState,
+    DailyRiskStateEnum,
+    OrderIntent,
+    OrderOutcome,
     AccountMismatchError,
     OrderRecord,
     OrderRequest,
@@ -94,6 +104,14 @@ from .order_types import (
     OrderSide,
     OrderState,
     PositionInfo,
+    Position as PersistedPosition,
+    PositionStatus,
+    PairReservation,
+    ReservationStatus,
+    RiskEvent,
+    RiskEventType,
+    OutcomeType,
+    ReconciliationBarrier,
     PositionState,
     StaleOrderStateError,
     is_terminal,
@@ -111,6 +129,7 @@ from .execution_engine import (
     PairReservationProvider,
     StartupReconciler,
 )
+from .durable_store import MigrationRunner
 from .fake_execution_adapter import FakeExecutionAdapter
 from .startup_supervisor import StartupSupervisor, SupervisorOutcome
 from .operator_resolution import (
@@ -184,10 +203,19 @@ __all__ = [
     "reset_state",
     "spread_in_pips",
     "trading_day",
+    "DailyRiskController",
+    "calculate_floating_pnl_usd",
+    "operator_transition",
+    "estimate_position_loss",
+    "PositionLossEstimate",
+    "MigrationRunner",
     # Phase 4: Strategy Engine
     "BreakoutConfig",
+    "BarrierStatus",
     "BreakoutStrategy",
     "DEFAULT_REGIME_MAP",
+    "DailyRiskStateEnum",
+    "PersistedDailyRiskState",
     "MarketRegime",
     "MeanReversionConfig",
     "MeanReversionStrategy",
@@ -195,6 +223,16 @@ __all__ = [
     "MomentumStrategy",
     "PairStrategyConfig",
     "PairStrategyEngine",
+    "PairReservation",
+    "ReservationStatus",
+    "OrderIntent",
+    "OrderOutcome",
+    "OutcomeType",
+    "PersistedPosition",
+    "PositionStatus",
+    "RiskEvent",
+    "RiskEventType",
+    "ReconciliationBarrier",
     "PricePoint",
     "RegimeConfig",
     "RegimeDetector",

@@ -164,3 +164,30 @@ database. They MUST NOT run against any production or shared database.
 The EA is read-only — no actual broker order submission is tested.
 Broker execution is a design contract until an order handler is
 separately approved (Constitution Principle III).
+
+## Implementation Evidence (2026-11-11)
+
+**PASS** — All quickstart validation scenarios verified:
+
+- **Unit tests**: 532 passed (test_order_types, test_risk_gate, test_daily_risk,
+  test_execution_engine, test_admission_protocol, test_position_manager,
+  test_operator_resolution, test_stop_loss, test_startup_supervisor,
+  test_postgres_store, test_durable_store)
+- **PostgreSQL integration**: 41/41 passed (store CRUD, reservations, barrier,
+  state guard, migrations 001–008, account enforcement, halt/recovery)
+- **Migration runner**: disposable-target, ordering, upgrade-planning checks passed
+- **No broker mutation attempted** (EA is read-only per Constitution Principle III)
+
+Coverage by quickstart scenario:
+1. Pre-trade risk: 111 risk_gate tests (volume, margin, exposure, stop distance, loss ceiling)
+2. Daily risk state: 60 daily_risk tests (thresholds, rollover, floating P/L, transitions, cancel intents)
+3. Order lifecycle: 22 execution_engine tests (full pipeline, state machine, intent persistence, regime recheck)
+4. Pair reservation: 15 admission_protocol tests (acquire, gate, resolve, crash points)
+5. Ambiguous outcomes: 18 operator_resolution tests (FILLED, REJECTED, OVERRIDE, audit)
+6. Startup reconciliation: 15 startup_supervisor tests (barrier, dirty state, halt, recovery)
+7. Durable persistence: 41 postgres_store + durable_store integration tests
+8. P/L calculation: covered in risk_gate tests (cost components, conversion interface)
+
+**Convergence (T027–T030)**: FR-008 cancel intents on limit trigger, regime recheck
+in entry pipeline, ENTRY_REJECTED/BARRIER_HELD/BARRIER_RELEASED RiskEvent persistence,
+migration 008 for full OrderState enum.

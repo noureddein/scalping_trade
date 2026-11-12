@@ -158,13 +158,17 @@ Account-wide entry gate for startup reconciliation.
 
 ```
 DRAFT → PENDING_SUBMIT → SUBMITTING → SUBMITTED
-                                         ↓
-                              ┌──────────┼──────────┐
+  ↓          ↓                           ↓
+  └──→ CANCELLED ←────────────┌──────────┼──────────┐
                               ↓          ↓          ↓
                            FILLED    REJECTED    UNKNOWN
                                                     ↓
                                           OPERATOR_RESOLVED
 ```
+
+**Cancellable states**: DRAFT, PENDING_SUBMIT (local cancel on daily
+limit trigger or system shutdown). SUBMITTED may be cancelled by broker.
+SUBMITTING cannot be cancelled (outcome unknown).
 
 **Blocking states** (pair reserved, entries blocked):
 DRAFT, PENDING_SUBMIT, SUBMITTING, SUBMITTED, UNKNOWN

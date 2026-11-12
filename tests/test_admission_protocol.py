@@ -173,7 +173,7 @@ def _engine(adapter=None, reservation=None):
         config=ExecutionConfig(
             live_trading_enabled=True,
             max_concurrent_positions=5,
-            atr_stop_multiplier=Decimal("1.5"),
+            atr_stop_multiplier=Decimal("1"),
         ),
         adapter=adapter or _TestAdapter(),
         durable_store=_TestDurableStore(),

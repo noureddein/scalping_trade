@@ -49,6 +49,8 @@ from .order_types import (
     OrderState,
     OverrideAuditRecord,
     PositionInfo,
+    RiskEvent,
+    RiskEventType,
     StaleOrderStateError,
     is_terminal,
     is_valid_transition,
@@ -102,23 +104,26 @@ class PostgresDurableStateStore(DurableStateStore):
         self._get_conn().execute(
             """
             INSERT INTO daily_risk_state
-                (trading_day, risk_state, realized_pnl_usd, commission_usd, swap_usd, updated_at)
-            VALUES (%s, %s, %s, %s, %s, now())
+                (trading_day, risk_state, realized_pnl_usd, floating_pnl_usd,
+                 commission_usd, swap_usd, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, now())
             ON CONFLICT (trading_day) DO UPDATE SET
                 risk_state       = EXCLUDED.risk_state,
                 realized_pnl_usd = EXCLUDED.realized_pnl_usd,
+                floating_pnl_usd = EXCLUDED.floating_pnl_usd,
                 commission_usd   = EXCLUDED.commission_usd,
                 swap_usd         = EXCLUDED.swap_usd,
                 updated_at       = now()
             """,
-            (trading_day, state.value, pnl.realized_pnl_usd, pnl.commission_usd, pnl.swap_usd),
+            (trading_day, state.value, pnl.realized_pnl_usd, pnl.floating_pnl_usd,
+             pnl.commission_usd, pnl.swap_usd),
         )
 
     def load_risk_snapshot(
         self, trading_day: date,
     ) -> tuple[RiskState, DailyPnL] | None:
         row = self._get_conn().execute(
-            "SELECT risk_state, realized_pnl_usd, commission_usd, swap_usd "
+            "SELECT risk_state, realized_pnl_usd, floating_pnl_usd, commission_usd, swap_usd "
             "FROM daily_risk_state WHERE trading_day = %s",
             (trading_day,),
         ).fetchone()
@@ -128,11 +133,46 @@ class PostgresDurableStateStore(DurableStateStore):
             RiskState(row["risk_state"]),
             DailyPnL(
                 realized_pnl_usd=Decimal(str(row["realized_pnl_usd"])),
-                floating_pnl_usd=Decimal(0),
+                floating_pnl_usd=Decimal(str(row["floating_pnl_usd"])),
                 commission_usd=Decimal(str(row["commission_usd"])),
                 swap_usd=Decimal(str(row["swap_usd"])),
             ),
         )
+
+    def save_risk_transition(
+        self, trading_day: date, state: RiskState, pnl: DailyPnL,
+        event: RiskEvent,
+    ) -> None:
+        conn = self._get_conn()
+        with conn.transaction():
+            conn.execute(
+                """
+                INSERT INTO daily_risk_state
+                    (trading_day, risk_state, realized_pnl_usd, floating_pnl_usd,
+                     commission_usd, swap_usd, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, now())
+                ON CONFLICT (trading_day) DO UPDATE SET
+                    risk_state = EXCLUDED.risk_state,
+                    realized_pnl_usd = EXCLUDED.realized_pnl_usd,
+                    floating_pnl_usd = EXCLUDED.floating_pnl_usd,
+                    commission_usd = EXCLUDED.commission_usd,
+                    swap_usd = EXCLUDED.swap_usd,
+                    updated_at = now()
+                """,
+                (trading_day, state.value, pnl.realized_pnl_usd, pnl.floating_pnl_usd,
+                 pnl.commission_usd, pnl.swap_usd),
+            )
+            conn.execute(
+                """
+                INSERT INTO risk_events
+                    (event_id, account_id, event_type, detail, related_intent_id,
+                     related_position_id, operator_id, created_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (event.event_id, event.account_id, event.event_type.value, event.detail,
+                 event.related_intent_id, event.related_position_id,
+                 event.operator_id, event.created_at),
+            )
 
     # -- Orders --------------------------------------------------------------
 
@@ -216,6 +256,36 @@ class PostgresDurableStateStore(DurableStateStore):
             "('PENDING_SUBMIT','SUBMITTED','UNKNOWN','OPERATOR_OVERRIDE')",
         ).fetchall()
         return [_row_to_order_record(r) for r in rows]
+
+    def cancel_cancellable_orders(self) -> int:
+        row = self._get_conn().execute(
+            "UPDATE orders SET state = 'CANCELLED', updated_at = now() "
+            "WHERE state IN ('DRAFT', 'PENDING_SUBMIT') "
+            "RETURNING idempotency_key",
+        ).fetchall()
+        return len(row)
+
+    def log_risk_event(self, event: RiskEvent) -> None:
+        conn = self._get_conn()
+        account_id = event.account_id
+        if not account_id:
+            row = conn.execute(
+                "SELECT account_id FROM schema_account WHERE id = 1",
+            ).fetchone()
+            if row is None:
+                return
+            account_id = row["account_id"]
+        conn.execute(
+            """
+            INSERT INTO risk_events
+                (event_id, account_id, event_type, detail, related_intent_id,
+                 related_position_id, operator_id, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (event.event_id, account_id, event.event_type.value,
+             event.detail, event.related_intent_id,
+             event.related_position_id, event.operator_id, event.created_at),
+        )
 
     # -- Positions -----------------------------------------------------------
 
@@ -682,6 +752,14 @@ class PostgresStartupReconciler(StartupReconciler):
                 """,
                 (self._process_id,),
             )
+            _persist_risk_event(
+                conn, RiskEventType.BARRIER_HELD,
+                f"reconciliation barrier held by {self._process_id}",
+            )
+            _persist_risk_event(
+                conn, RiskEventType.RECONCILIATION_START,
+                f"startup reconciliation started by {self._process_id}",
+            )
             conn.execute("COMMIT")
         except Exception:
             try:
@@ -700,19 +778,36 @@ class PostgresStartupReconciler(StartupReconciler):
 
     def complete(self) -> None:
         conn = self._get_conn()
-        row = conn.execute(
-            """
-            UPDATE reconciliation_barrier
-            SET status = 'READY', completed_at = now()
-            WHERE id = 1 AND reconciler_id = %s AND status = 'RECONCILING'
-            RETURNING status
-            """,
-            (self._process_id,),
-        ).fetchone()
-        if row is None:
-            raise RuntimeError(
-                "complete() called but this process is not the active reconciler"
+        conn.execute("BEGIN")
+        try:
+            row = conn.execute(
+                """
+                UPDATE reconciliation_barrier
+                SET status = 'READY', completed_at = now()
+                WHERE id = 1 AND reconciler_id = %s AND status = 'RECONCILING'
+                RETURNING status
+                """,
+                (self._process_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError(
+                    "complete() called but this process is not the active reconciler"
+                )
+            _persist_risk_event(
+                conn, RiskEventType.RECONCILIATION_COMPLETE,
+                f"startup reconciliation completed by {self._process_id}",
             )
+            _persist_risk_event(
+                conn, RiskEventType.BARRIER_RELEASED,
+                f"reconciliation barrier released by {self._process_id}",
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                self._conn = None
+            raise
         conn.execute(
             "SELECT pg_advisory_unlock(%s)", (_RECONCILIATION_LOCK_ID,),
         )
@@ -774,6 +869,10 @@ class PostgresStartupReconciler(StartupReconciler):
                         "WHERE id = 1 AND status = 'READY'",
                         (target_status,),
                     )
+                    _persist_risk_event(
+                        conn, RiskEventType.ADMISSION_HALTED,
+                        "entry barrier halted after unresolved broker outcome",
+                    )
                 self._ready_cached = False
                 return True
             except Exception:
@@ -791,6 +890,23 @@ class PostgresStartupReconciler(StartupReconciler):
 # ---------------------------------------------------------------------------
 # Row → dataclass helpers
 # ---------------------------------------------------------------------------
+
+def _persist_risk_event(conn: psycopg.Connection, event_type: RiskEventType,
+                        detail: str) -> None:
+    account = conn.execute(
+        "SELECT account_id FROM schema_account WHERE id = 1",
+    ).fetchone()
+    if account is None:
+        raise RuntimeError("database account must be verified before risk events are recorded")
+    conn.execute(
+        """
+        INSERT INTO risk_events
+            (event_id, account_id, event_type, detail, related_intent_id,
+             related_position_id, operator_id, created_at)
+        VALUES (%s, %s, %s, %s, NULL, NULL, NULL, now())
+        """,
+        (uuid.uuid4(), account["account_id"], event_type.value, detail),
+    )
 
 def _row_to_order_record(row: dict) -> OrderRecord:
     return OrderRecord(

@@ -77,9 +77,9 @@ def calculate_stop_loss(
     if loss_per_point <= 0:
         return StopLossResult(approved=False, reject_reason="loss_per_point_non_positive")
 
-    max_stop_distance = max_loss_usd / loss_per_point
-
-    stop_distance = min(atr_points, max_stop_distance)
+    # Preserve the strategy's requested distance. Never silently narrow it
+    # to meet the cash ceiling or widen it to meet broker constraints.
+    stop_distance = atr_points
 
     if contract.min_stop_distance > 0 and stop_distance < contract.min_stop_distance:
         cash_at_min_stop = loss_per_point * contract.min_stop_distance
@@ -90,9 +90,19 @@ def calculate_stop_loss(
                 estimated_loss_usd=cash_at_min_stop,
                 reject_reason="broker_min_stop_exceeds_cash_ceiling",
             )
-        stop_distance = contract.min_stop_distance
+        return StopLossResult(
+            approved=False, stop_distance_points=stop_distance,
+            estimated_loss_usd=loss_per_point * stop_distance,
+            reject_reason="stop_distance_below_broker_minimum",
+        )
 
     estimated_loss = loss_per_point * stop_distance
+    if estimated_loss > max_loss_usd:
+        return StopLossResult(
+            approved=False, stop_distance_points=stop_distance,
+            estimated_loss_usd=estimated_loss,
+            reject_reason="estimated_loss_exceeds_intended_0_50_usd_loss_ceiling",
+        )
 
     if side == OrderSide.BUY:
         stop_price = entry_price - stop_distance

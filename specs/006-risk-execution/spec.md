@@ -289,8 +289,9 @@ Verify calculations match manual verification.
 - **FR-007**: Daily reset MUST use the Asia/Amman timezone boundary
   with explicit timezone-aware logic.
 - **FR-008**: When daily limits trigger, new entries MUST be blocked
-  and pending entry orders cancelled. Open positions MUST NOT be
-  force-closed.
+  and local pending entry intents (DRAFT, PENDING_SUBMIT) MUST be
+  transitioned to CANCELLED. Open positions MUST NOT be force-closed.
+  Broker-side cancellation is not available with the read-only EA.
 - **FR-009**: The system MUST persist order intent and acquire a
   durable pair reservation before any broker submission.
 - **FR-010**: Maximum one active position per canonical pair. A second
@@ -391,5 +392,18 @@ Verify calculations match manual verification.
 - Exit rules (SL/TP placement, trailing, early exit, adaptive TP) are
   deferred (§19#1, #6, #7). Phase 5 validates stop/target against
   broker constraints but does not select exit parameters.
+- The slippage estimate used in the $0.50 ceiling calculation requires
+  owner approval (§19 deferred decision). Fail closed (reject entry)
+  if not configured. Phase 5 implements the calculation interface;
+  the actual slippage estimate value per pair is not invented.
+- Commission values are sourced from the broker's contract
+  specification (Phase 2 ContractSpecification) when available. If
+  unavailable, the commission estimate is a configurable per-pair
+  value requiring owner approval. Fail closed if neither source
+  exists.
+- Exposure limits (maximum total lot exposure per account) require
+  owner approval (§19 deferred decision). Fail closed if not
+  configured. For the single-pair 0.01-lot pilot, this is effectively
+  a formality.
 - PostgreSQL is the durable store. Migrations 001–006 exist but are
   unapplied; integration testing requires a disposable database.
