@@ -84,12 +84,86 @@ class EntryCheck:
     estimated_loss_usd: Decimal | None
     loss_estimate_valid: bool
     spread_gate_eligible: bool = True
+    # Broker volume constraints (FR-001)
+    broker_volume_min: Decimal | None = None
+    broker_volume_max: Decimal | None = None
+    broker_volume_step: Decimal | None = None
+    # Stop distance vs broker minimum (FR-003)
+    stop_distance_points: Decimal | None = None
+    broker_min_stop_distance: Decimal | None = None
+    # Margin validation (T010)
+    margin_required: Decimal | None = None
+    margin_available: Decimal | None = None
+    # Exposure limits (§19 owner-approved, fail closed if None)
+    current_exposure_lots: Decimal | None = None
+    max_exposure_lots: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class EntryDecision:
     approved: bool
     reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PositionLossEstimate:
+    valid: bool
+    gross_stop_loss_usd: Decimal | None = None
+    spread_cost_usd: Decimal | None = None
+    commission_cost_usd: Decimal | None = None
+    slippage_cost_usd: Decimal | None = None
+    swap_cost_usd: Decimal | None = None
+    estimated_loss_usd: Decimal | None = None
+    reason: str | None = None
+
+
+def estimate_position_loss(
+    *, lot_size: Decimal, stop_distance: Decimal, spread_distance: Decimal,
+    slippage_distance: Decimal | None, tick_size: Decimal, tick_value: Decimal,
+    commission_per_lot: Decimal | None, account_to_usd_rate: Decimal | None,
+    swap_per_lot: Decimal = Decimal(0),
+) -> PositionLossEstimate:
+    """Estimate USD loss; owner supplied costs/conversion are mandatory.
+
+    The estimate adds stop movement, spread, commission, expected
+    slippage, and swap without treating the estimate as a loss guarantee.
+    Missing commission, slippage, or currency conversion fails closed.
+    """
+    required = {
+        "lot_size": lot_size, "stop_distance": stop_distance,
+        "spread_distance": spread_distance, "tick_size": tick_size,
+        "tick_value": tick_value,
+    }
+    for name, value in required.items():
+        if not _is_finite_decimal(value) or value <= 0:
+            return PositionLossEstimate(False, reason=f"{name}_invalid")
+    if commission_per_lot is None or not _is_finite_decimal(commission_per_lot):
+        return PositionLossEstimate(False, reason="commission_estimate_unavailable")
+    if commission_per_lot < 0:
+        return PositionLossEstimate(False, reason="commission_estimate_invalid")
+    if slippage_distance is None:
+        return PositionLossEstimate(False, reason="slippage_estimate_unavailable")
+    if not _is_finite_decimal(slippage_distance) or slippage_distance < 0:
+        return PositionLossEstimate(False, reason="slippage_estimate_invalid")
+    if account_to_usd_rate is None:
+        return PositionLossEstimate(False, reason="account_currency_conversion_unavailable")
+    if not _is_finite_decimal(account_to_usd_rate) or account_to_usd_rate <= 0:
+        return PositionLossEstimate(False, reason="account_currency_conversion_invalid")
+    if not _is_finite_decimal(swap_per_lot) or swap_per_lot < 0:
+        return PositionLossEstimate(False, reason="swap_estimate_invalid")
+
+    usd_per_price_unit = tick_value / tick_size * lot_size * account_to_usd_rate
+    gross = stop_distance * usd_per_price_unit
+    spread = spread_distance * usd_per_price_unit
+    slippage = slippage_distance * usd_per_price_unit
+    commission = commission_per_lot * lot_size * account_to_usd_rate
+    swap = swap_per_lot * lot_size * account_to_usd_rate
+    return PositionLossEstimate(
+        valid=True, gross_stop_loss_usd=gross, spread_cost_usd=spread,
+        commission_cost_usd=commission, slippage_cost_usd=slippage,
+        swap_cost_usd=swap,
+        estimated_loss_usd=gross + spread + commission + slippage + swap,
+    )
 
 
 def _canonical_pair_error(pair: str) -> str | None:
@@ -181,5 +255,49 @@ def evaluate_entry(check: EntryCheck) -> EntryDecision:
         reasons.append("usd_loss_estimate_invalid")
     elif check.estimated_loss_usd > MAX_INTENDED_LOSS_USD:
         reasons.append("estimated_loss_exceeds_intended_0_50_usd_loss_ceiling")
+
+    # FR-001: Broker volume constraints
+    if check.broker_volume_min is not None:
+        if _is_finite_decimal(check.broker_volume_min) and check.volume_lots < check.broker_volume_min:
+            reasons.append("volume_below_broker_minimum")
+    if check.broker_volume_max is not None:
+        if _is_finite_decimal(check.broker_volume_max) and check.volume_lots > check.broker_volume_max:
+            reasons.append("volume_above_broker_maximum")
+    if check.broker_volume_step is not None and _is_finite_decimal(check.broker_volume_step):
+        if check.broker_volume_step > 0 and _is_finite_decimal(check.volume_lots):
+            remainder = check.volume_lots % check.broker_volume_step
+            if remainder != 0:
+                reasons.append("volume_not_aligned_to_broker_step")
+
+    # FR-003: Stop distance vs broker minimum
+    if check.stop_distance_points is not None and check.broker_min_stop_distance is not None:
+        if (_is_finite_decimal(check.stop_distance_points)
+                and _is_finite_decimal(check.broker_min_stop_distance)
+                and check.broker_min_stop_distance > 0
+                and check.stop_distance_points < check.broker_min_stop_distance):
+            reasons.append("stop_distance_below_broker_minimum")
+
+    # Margin validation — fail closed if unavailable
+    if check.margin_required is not None and check.margin_available is not None:
+        if (_is_finite_decimal(check.margin_required)
+                and _is_finite_decimal(check.margin_available)
+                and check.margin_required > check.margin_available):
+            reasons.append("insufficient_margin")
+    elif check.margin_required is None and check.margin_available is None:
+        pass  # legacy callers without margin info — checked elsewhere
+    else:
+        if check.margin_required is None:
+            reasons.append("margin_required_unavailable")
+        if check.margin_available is None:
+            reasons.append("margin_available_unavailable")
+
+    # Exposure limits — §19 owner-approved, fail closed if not configured
+    if check.max_exposure_lots is not None:
+        if check.current_exposure_lots is None:
+            reasons.append("current_exposure_unavailable")
+        elif (_is_finite_decimal(check.current_exposure_lots)
+                and _is_finite_decimal(check.max_exposure_lots)
+                and check.current_exposure_lots + check.volume_lots > check.max_exposure_lots):
+            reasons.append("exposure_limit_exceeded")
 
     return EntryDecision(approved=not reasons, reasons=tuple(reasons))

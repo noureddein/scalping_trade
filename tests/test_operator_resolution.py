@@ -252,7 +252,7 @@ def test_resolve_order_not_found():
     store, reservation = _linked_fixtures()
 
     result = resolve_pending_submit("nonexistent", ResolutionEvidence(
-        verdict=ResolutionVerdict.FILLED, operator_id="ops"), store, reservation)
+        verdict=ResolutionVerdict.REJECTED, operator_id="ops"), store, reservation)
 
     assert not result.success
     assert "not found" in result.message

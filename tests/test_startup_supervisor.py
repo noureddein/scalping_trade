@@ -140,6 +140,10 @@ class _MemReconciler(StartupReconciler):
     def is_reconciled(self):
         return self._reconciled
 
+    def halt_entry_barrier(self):
+        self._reconciled = False
+        return True
+
 
 class _TestAdapter(FakeExecutionAdapter):
     @property

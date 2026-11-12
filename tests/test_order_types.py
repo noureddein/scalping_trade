@@ -3,11 +3,26 @@
 PREPARED — NOT YET RUN. Market-dependent tests deferred until market open.
 """
 from decimal import Decimal
+from datetime import datetime, timezone
+from uuid import uuid4
 
 from scalping_core.order_types import (
     OrderResult,
     OrderSide,
     OrderState,
+    OrderIntent,
+    OutcomeType,
+    OrderOutcome,
+    PairReservation,
+    ReservationStatus,
+    Position,
+    PositionStatus,
+    DailyRiskState,
+    DailyRiskStateEnum,
+    RiskEvent,
+    RiskEventType,
+    ReconciliationBarrier,
+    BarrierStatus,
     PositionState,
     StaleOrderStateError,
     is_terminal,
@@ -86,3 +101,37 @@ def test_stale_order_state_error_fields():
     assert err.attempted == OrderState.PENDING_SUBMIT
     assert err.current == OrderState.FILLED
     assert "FILLED" in str(err) and "PENDING_SUBMIT" in str(err)
+
+
+def test_phase5_persistence_contract_models_validate_and_preserve_values():
+    now = datetime.now(timezone.utc)
+    iid, sid = uuid4(), uuid4()
+    intent = OrderIntent(iid, "EURUSD", "acct", OrderSide.BUY, Decimal("0.01"),
+                         Decimal("1.1"), Decimal("1.09"), Decimal("1.12"),
+                         Decimal("0.4"), "momentum", sid, OrderState.DRAFT, now, now)
+    outcome = OrderOutcome(uuid4(), iid, None, None, None, OutcomeType.UNKNOWN,
+                           "timeout", None, now)
+    reservation = PairReservation(uuid4(), "EURUSD", "acct", iid,
+                                  ReservationStatus.HELD, now)
+    position = Position(uuid4(), "EURUSD", "acct", iid, OrderSide.BUY,
+                        Decimal("0.01"), Decimal("1.1"), Decimal("1.09"),
+                        Decimal("1.12"), PositionStatus.OPEN, now)
+    risk = DailyRiskState(uuid4(), "acct", now.date(), DailyRiskStateEnum.ACTIVE,
+                          *(Decimal("0") for _ in range(5)), Decimal("15"),
+                          Decimal("5"), now)
+    event = RiskEvent(uuid4(), "acct", RiskEventType.LOCK_ACTIVATED,
+                      "daily threshold", iid, position.position_id, None, now)
+    barrier = ReconciliationBarrier(uuid4(), "acct", BarrierStatus.HELD,
+                                    "startup recovery", now)
+    assert intent.state is OrderState.DRAFT
+    assert outcome.outcome_type is OutcomeType.UNKNOWN
+    assert reservation.status is ReservationStatus.HELD
+    assert position.status is PositionStatus.OPEN
+    assert risk.state is DailyRiskStateEnum.ACTIVE
+    assert event.related_intent_id == iid
+    assert barrier.status is BarrierStatus.HELD
+
+
+def test_draft_cannot_skip_submission_lifecycle():
+    assert is_valid_transition(OrderState.DRAFT, OrderState.PENDING_SUBMIT)
+    assert not is_valid_transition(OrderState.DRAFT, OrderState.FILLED)

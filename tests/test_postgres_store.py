@@ -2,7 +2,7 @@
 and PostgresStartupReconciler.
 
 PREPARED — NOT YET RUN. Requires a running PostgreSQL with the schema
-from migrations/001, 002, 003, 004, 005, and 006 applied.
+from migrations/001 through 007 applied.
 
 Set SCALPING_DATABASE_URL or defaults to postgresql://localhost:5432/scalping.
 """
@@ -33,6 +33,13 @@ pytestmark = pytest.mark.skipif(not _HAS_DB, reason="No SCALPING_DATABASE_URL se
 def store():
     from scalping_core.postgres_store import PostgresDurableStateStore
     s = PostgresDurableStateStore()
+    conn = s._get_conn()
+    conn.execute("DELETE FROM operator_override_audit")
+    conn.execute("DELETE FROM positions")
+    conn.execute("DELETE FROM orders")
+    conn.execute("DELETE FROM pair_reservations")
+    conn.execute("DELETE FROM daily_risk_state")
+    conn.execute("DELETE FROM risk_events")
     yield s
     s.close()
 
@@ -41,16 +48,28 @@ def store():
 def reconciler():
     """Provides a reconciler and ensures the barrier is reset after the test."""
     from scalping_core.postgres_store import PostgresStartupReconciler
+    # Reset barrier to PENDING and release any advisory locks before creating
+    import psycopg
+    conninfo = os.environ.get(
+        "SCALPING_DATABASE_URL", "postgresql://localhost:5432/scalping"
+    )
+    with psycopg.connect(conninfo, autocommit=True, row_factory=psycopg.rows.dict_row) as setup_conn:
+        setup_conn.execute("SELECT pg_advisory_unlock_all()")
+        setup_conn.execute(
+            "UPDATE reconciliation_barrier SET status = 'PENDING', "
+            "reconciler_id = NULL, started_at = NULL, completed_at = NULL "
+            "WHERE id = 1",
+        )
     r = PostgresStartupReconciler(process_id="test-reconciler")
     yield r
     try:
         conn = r._get_conn()
+        conn.execute("SELECT pg_advisory_unlock_all()")
         conn.execute(
             "UPDATE reconciliation_barrier SET status = 'PENDING', "
             "reconciler_id = NULL, started_at = NULL, completed_at = NULL "
             "WHERE id = 1",
         )
-        conn.execute("SELECT pg_advisory_unlock_all()")
     except Exception:
         pass
     r.close()

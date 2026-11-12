@@ -37,16 +37,15 @@ def test_sell_stop_above_entry():
     assert r.stop_price > Decimal("1.10000")
 
 
-def test_cash_ceiling_caps_stop():
-    """ATR suggests wide stop but $0.50 ceiling caps it."""
+def test_cash_ceiling_rejects_wide_stop_instead_of_narrowing_it():
     r = calculate_stop_loss(
         side=OrderSide.BUY,
         entry_price=Decimal("1.10000"),
         atr_points=Decimal("0.01000"),  # very wide ATR
         contract=_std_contract(),
     )
-    assert r.approved
-    assert r.estimated_loss_usd <= Decimal("0.50")
+    assert not r.approved
+    assert r.reject_reason == "estimated_loss_exceeds_intended_0_50_usd_loss_ceiling"
 
 
 def test_broker_min_stop_exceeds_ceiling():
@@ -61,6 +60,18 @@ def test_broker_min_stop_exceeds_ceiling():
     )
     assert not r.approved
     assert r.reject_reason == "broker_min_stop_exceeds_cash_ceiling"
+
+
+def test_stop_distance_below_broker_minimum_is_rejected_without_widening():
+    r = calculate_stop_loss(
+        side=OrderSide.BUY, entry_price=Decimal("1.10000"),
+        atr_points=Decimal("0.00010"),
+        contract=make_contract("EURUSD", tick_value="1.0", tick_size="0.00001",
+                                volume_min="0.01", min_stop_distance="0.00020"),
+    )
+    assert not r.approved
+    assert r.stop_price is None
+    assert r.reject_reason == "stop_distance_below_broker_minimum"
 
 
 def test_non_finite_entry_rejected():

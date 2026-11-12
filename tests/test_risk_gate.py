@@ -17,6 +17,7 @@ from scalping_core.risk_gate import (
     EntryDecision,
     RiskState,
     evaluate_entry,
+    estimate_position_loss,
 )
 
 
@@ -331,3 +332,124 @@ def test_unconfigured_spread_gate_is_denied():
     decision = evaluate_entry(_ok_check(spread_gate_eligible=False))
     assert not decision.approved
     assert "spread_gate_unconfigured_or_market_unhealthy" in decision.reasons
+
+
+class TestBrokerVolumeConstraints:
+    def test_volume_below_broker_minimum(self):
+        d = evaluate_entry(_ok_check(
+            volume_lots=Decimal("0.01"), broker_volume_min=Decimal("0.10"),
+        ))
+        assert "volume_below_broker_minimum" in d.reasons
+
+    def test_volume_above_broker_maximum(self):
+        d = evaluate_entry(_ok_check(
+            volume_lots=Decimal("0.01"), broker_volume_max=Decimal("0.005"),
+        ))
+        assert "volume_above_broker_maximum" in d.reasons
+
+    def test_volume_not_aligned_to_step(self):
+        d = evaluate_entry(_ok_check(
+            volume_lots=Decimal("0.01"), broker_volume_step=Decimal("0.03"),
+        ))
+        assert "volume_not_aligned_to_broker_step" in d.reasons
+
+    def test_volume_within_broker_constraints(self):
+        d = evaluate_entry(_ok_check(
+            broker_volume_min=Decimal("0.01"), broker_volume_max=Decimal("100"),
+            broker_volume_step=Decimal("0.01"),
+        ))
+        assert d.approved
+
+    def test_none_constraints_pass(self):
+        d = evaluate_entry(_ok_check())
+        assert d.approved
+
+
+class TestStopDistanceValidation:
+    def test_stop_below_broker_minimum(self):
+        d = evaluate_entry(_ok_check(
+            stop_distance_points=Decimal("0.00030"),
+            broker_min_stop_distance=Decimal("0.00050"),
+        ))
+        assert "stop_distance_below_broker_minimum" in d.reasons
+
+    def test_stop_above_broker_minimum(self):
+        d = evaluate_entry(_ok_check(
+            stop_distance_points=Decimal("0.00060"),
+            broker_min_stop_distance=Decimal("0.00050"),
+        ))
+        assert "stop_distance_below_broker_minimum" not in d.reasons
+
+
+class TestMarginValidation:
+    def test_insufficient_margin(self):
+        d = evaluate_entry(_ok_check(
+            margin_required=Decimal("100"), margin_available=Decimal("50"),
+        ))
+        assert "insufficient_margin" in d.reasons
+
+    def test_sufficient_margin(self):
+        d = evaluate_entry(_ok_check(
+            margin_required=Decimal("50"), margin_available=Decimal("100"),
+        ))
+        assert "insufficient_margin" not in d.reasons
+
+    def test_margin_required_unavailable(self):
+        d = evaluate_entry(_ok_check(
+            margin_required=None, margin_available=Decimal("100"),
+        ))
+        assert "margin_required_unavailable" in d.reasons
+
+    def test_margin_available_unavailable(self):
+        d = evaluate_entry(_ok_check(
+            margin_required=Decimal("50"), margin_available=None,
+        ))
+        assert "margin_available_unavailable" in d.reasons
+
+
+class TestExposureLimits:
+    def test_exposure_limit_exceeded(self):
+        d = evaluate_entry(_ok_check(
+            current_exposure_lots=Decimal("0.05"), max_exposure_lots=Decimal("0.05"),
+        ))
+        assert "exposure_limit_exceeded" in d.reasons
+
+    def test_exposure_within_limit(self):
+        d = evaluate_entry(_ok_check(
+            current_exposure_lots=Decimal("0.04"), max_exposure_lots=Decimal("0.05"),
+        ))
+        assert "exposure_limit_exceeded" not in d.reasons
+
+    def test_current_exposure_unavailable_when_limit_set(self):
+        d = evaluate_entry(_ok_check(
+            current_exposure_lots=None, max_exposure_lots=Decimal("0.05"),
+        ))
+        assert "current_exposure_unavailable" in d.reasons
+
+    def test_no_limit_configured_passes(self):
+        d = evaluate_entry(_ok_check(max_exposure_lots=None))
+        assert d.approved
+
+
+def test_position_loss_components_are_additive_and_converted():
+    result = estimate_position_loss(
+        lot_size=Decimal("0.01"), stop_distance=Decimal("0.00050"),
+        spread_distance=Decimal("0.00010"), slippage_distance=Decimal("0.00005"),
+        tick_size=Decimal("0.00001"), tick_value=Decimal("1"),
+        commission_per_lot=Decimal("7"), swap_per_lot=Decimal("1"),
+        account_to_usd_rate=Decimal("1"),
+    )
+    assert result.valid
+    assert result.gross_stop_loss_usd == Decimal("0.50")
+    assert result.estimated_loss_usd == Decimal("0.73")
+
+
+def test_position_loss_requires_slippage_estimate():
+    result = estimate_position_loss(
+        lot_size=Decimal("0.01"), stop_distance=Decimal("0.00050"),
+        spread_distance=Decimal("0.00010"), slippage_distance=None,
+        tick_size=Decimal("0.00001"), tick_value=Decimal("1"),
+        commission_per_lot=Decimal("7"), account_to_usd_rate=Decimal("1"),
+    )
+    assert not result.valid
+    assert result.reason == "slippage_estimate_unavailable"

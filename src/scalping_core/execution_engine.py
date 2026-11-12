@@ -56,7 +56,7 @@ import abc
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from decimal import Decimal
 
 from .broker_types import ConnectionStatus, ContractSpec, SymbolMapping, Tick
@@ -72,6 +72,8 @@ from .order_types import (
     OrderState,
     OverrideAuditRecord,
     PositionInfo,
+    RiskEvent,
+    RiskEventType,
     StaleOrderStateError,
     is_terminal,
 )
@@ -85,7 +87,7 @@ from .risk_gate import (
 )
 from .spread_engine import SpreadSnapshot, SpreadTracker, StabilityState
 from .stop_loss import StopLossResult, calculate_stop_loss
-from .strategy_types import Signal, SignalDirection
+from .strategy_types import MarketRegime, Signal, SignalDirection
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +120,17 @@ class DurableStateStore(abc.ABC):
     ) -> tuple["RiskState", DailyPnL] | None:
         """Load the last-saved risk state for a trading day. None if no row."""
 
+    def save_risk_transition(
+        self, trading_day: date, state: "RiskState", pnl: DailyPnL,
+        event: RiskEvent,
+    ) -> None:
+        """Persist a risk state transition and its audit event atomically.
+
+        Stores without this operation fail closed instead of writing only one
+        half of the audit record.
+        """
+        raise NotImplementedError("atomic risk transition persistence is required")
+
     # -- Orders --------------------------------------------------------------
 
     @abc.abstractmethod
@@ -139,6 +152,20 @@ class DurableStateStore(abc.ABC):
     @abc.abstractmethod
     def load_non_terminal_orders(self) -> list["OrderRecord"]:
         """Load all orders in non-terminal state for reconciliation."""
+
+    def cancel_cancellable_orders(self) -> int:
+        """Cancel all DRAFT and PENDING_SUBMIT orders (FR-008).
+
+        Returns the number of orders cancelled. Stores that do not
+        support this operation return 0 — fail-closed callers must
+        check the entry gate independently.
+        """
+        return 0
+
+    def log_risk_event(self, event: RiskEvent) -> None:
+        """Persist an audit RiskEvent. Best-effort — callers must not
+        rely on this for safety-critical control flow."""
+        pass
 
     # -- Positions -----------------------------------------------------------
 
@@ -590,6 +617,7 @@ class ExecutionEngine:
         daily_pnl: DailyPnL,
         broker_connected: bool,
         atr_points: Decimal | None = None,
+        current_regime: MarketRegime | None = None,
     ) -> ExecutionAttempt:
         """Run the full §8 deterministic entry sequence.
 
@@ -637,6 +665,11 @@ class ExecutionEngine:
             spread_in_pips(fresh_tick, mapping.contract),
             fresh_tick.recv_time_mono,
         )
+
+        # §8 step 4: Regime recheck — reject if current regime drifted
+        if current_regime is not None and current_regime != signal.regime:
+            reasons.append("regime_mismatch")
+            return ExecutionAttempt(executed=False, reject_reasons=tuple(reasons))
 
         # Position concurrency check
         if self._config.max_concurrent_positions is not None:
@@ -717,6 +750,17 @@ class ExecutionEngine:
             reasons.extend(entry_decision.reasons)
 
         if reasons:
+            if self._durable_store is not None:
+                try:
+                    self._durable_store.log_risk_event(RiskEvent(
+                        event_id=uuid.uuid4(), account_id="",
+                        event_type=RiskEventType.ENTRY_REJECTED,
+                        detail=f"{signal.canonical_pair}: {', '.join(reasons)}",
+                        related_intent_id=None, related_position_id=None,
+                        operator_id=None, created_at=datetime.now(timezone.utc),
+                    ))
+                except Exception:
+                    pass
             return ExecutionAttempt(
                 executed=False,
                 entry_decision=entry_decision,

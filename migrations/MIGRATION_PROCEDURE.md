@@ -17,23 +17,25 @@ Migrations must be applied in sequence. Each depends on the previous.
 | 002_state_guard_and_reservation_owner.sql | 001 | Order state transition trigger, schema_account singleton. |
 | 003_reconciliation_barrier.sql | 002 | reconciliation_barrier singleton table, seeded as PENDING. |
 | 004_admission_protocol.sql | 003 | admission_status column on pair_reservations. |
+| 005_operator_override.sql | 004 | Auditable operator resolution. |
+| 006_halted_barrier_status.sql | 005 | Account-wide HALTED barrier. |
+| 007_daily_risk_audit.sql | 006 | Floating P/L and risk-event audit rows. |
 
-## Applying migrations
+## Applying migrations to a disposable test database
 
 ```bash
-# From the project root, one at a time:
-psql -d scalping -f migrations/001_initial_schema.sql
-psql -d scalping -f migrations/002_state_guard_and_reservation_owner.sql
-psql -d scalping -f migrations/003_reconciliation_barrier.sql
-psql -d scalping -f migrations/004_admission_protocol.sql
+# The target name must clearly identify a disposable test database.
+python -c 'from scalping_core.durable_store import MigrationRunner; print(MigrationRunner("postgresql://localhost/scalping_test", "migrations", "scalping_test").apply())'
 ```
 
-Each migration wraps its changes in `BEGIN`/`COMMIT`. If any statement
-fails, the entire migration rolls back — no partial state.
+The runner checks the connection target, records applied versions, rejects
+gaps, and runs each migration in its own transaction. Do not target the
+`scalping` database or any shared/production database. Applying migrations
+outside a disposable test database requires separate owner approval.
 
 ## Verification
 
-After applying all four:
+After applying all seven:
 
 ```sql
 -- Verify tables exist

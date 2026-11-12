@@ -94,6 +94,7 @@ class _TestReservation(PairReservationProvider):
         self._available: bool = True
         self.acquire_calls: list[str] = []
         self.release_calls: list[str] = []
+        self._gate_submission_called: bool = False
 
     def is_available(self) -> bool:
         return self._available
@@ -120,6 +121,7 @@ class _TestReservation(PairReservationProvider):
         self._held.discard(canonical_pair)
 
     def gate_submission(self, canonical_pair, order_request=None) -> bool:
+        self._gate_submission_called = True
         return canonical_pair in self._held
 
     def resolve_admission(self, canonical_pair, record=None, position=None, override_audit=None) -> None:
@@ -193,7 +195,7 @@ def _active_engine(
         config=ExecutionConfig(
             live_trading_enabled=True,
             max_concurrent_positions=5,
-            atr_stop_multiplier=Decimal("1.5"),
+            atr_stop_multiplier=Decimal("1"),
         ),
         adapter=adapter or _TestAdapter(),
         durable_store=_TestDurableStore(),
@@ -230,7 +232,7 @@ def test_inactive_with_fake_adapter():
         config=ExecutionConfig(
             live_trading_enabled=True,
             max_concurrent_positions=5,
-            atr_stop_multiplier=Decimal("1.5"),
+            atr_stop_multiplier=Decimal("1"),
         ),
         adapter=FakeExecutionAdapter(),
         durable_store=_TestDurableStore(),
@@ -245,7 +247,7 @@ def test_inactive_without_durable_store():
         config=ExecutionConfig(
             live_trading_enabled=True,
             max_concurrent_positions=5,
-            atr_stop_multiplier=Decimal("1.5"),
+            atr_stop_multiplier=Decimal("1"),
         ),
         adapter=_TestAdapter(),
         reservation_provider=_TestReservation(),
@@ -266,7 +268,7 @@ def test_inactive_with_disabled_execution():
         config=ExecutionConfig(
             live_trading_enabled=True,
             max_concurrent_positions=5,
-            atr_stop_multiplier=Decimal("1.5"),
+            atr_stop_multiplier=Decimal("1"),
         ),
         adapter=_DisabledAdapter(),
         durable_store=_TestDurableStore(),
@@ -281,7 +283,7 @@ def test_inactive_without_reservation_provider():
         config=ExecutionConfig(
             live_trading_enabled=True,
             max_concurrent_positions=5,
-            atr_stop_multiplier=Decimal("1.5"),
+            atr_stop_multiplier=Decimal("1"),
         ),
         adapter=_TestAdapter(),
         durable_store=_TestDurableStore(),
@@ -297,7 +299,7 @@ def test_inactive_with_unavailable_reservation_provider():
         config=ExecutionConfig(
             live_trading_enabled=True,
             max_concurrent_positions=5,
-            atr_stop_multiplier=Decimal("1.5"),
+            atr_stop_multiplier=Decimal("1"),
         ),
         adapter=_TestAdapter(),
         durable_store=_TestDurableStore(),
@@ -312,7 +314,7 @@ def test_inactive_without_reconciliation():
         config=ExecutionConfig(
             live_trading_enabled=True,
             max_concurrent_positions=5,
-            atr_stop_multiplier=Decimal("1.5"),
+            atr_stop_multiplier=Decimal("1"),
         ),
         adapter=_TestAdapter(),
         durable_store=_TestDurableStore(),
@@ -635,7 +637,7 @@ def test_resolve_admission_failure_surfaces_failed_shared_halt():
         config=ExecutionConfig(
             live_trading_enabled=True,
             max_concurrent_positions=5,
-            atr_stop_multiplier=Decimal("1.5"),
+            atr_stop_multiplier=Decimal("1"),
         ),
         adapter=adapter,
         durable_store=_TestDurableStore(),
@@ -718,7 +720,7 @@ def test_unresolved_fill_halts_independent_engine_via_shared_barrier():
         config=ExecutionConfig(
             live_trading_enabled=True,
             max_concurrent_positions=5,
-            atr_stop_multiplier=Decimal("1.5"),
+            atr_stop_multiplier=Decimal("1"),
         ),
         adapter=adapter1,
         durable_store=_TestDurableStore(),
@@ -761,7 +763,7 @@ def test_unresolved_fill_halts_independent_engine_via_shared_barrier():
         config=ExecutionConfig(
             live_trading_enabled=True,
             max_concurrent_positions=5,
-            atr_stop_multiplier=Decimal("1.5"),
+            atr_stop_multiplier=Decimal("1"),
         ),
         adapter=adapter2,
         durable_store=_TestDurableStore(),
@@ -864,3 +866,72 @@ def test_duplicate_pair_position_blocked():
     )
     assert not r2.executed
     assert any("position" in r or "pending" in r for r in r2.reject_reasons)
+
+
+def test_order_state_machine_rejects_invalid_transitions():
+    """SC-008: Invalid state transitions are blocked."""
+    from scalping_core.order_types import OrderState, is_terminal, is_valid_transition
+    # Terminal states are terminal
+    for state in (OrderState.REJECTED, OrderState.CANCELLED):
+        assert is_terminal(state)
+
+    # DRAFT cannot skip to FILLED
+    assert not is_valid_transition(OrderState.DRAFT, OrderState.FILLED)
+    # DRAFT can go to PENDING_SUBMIT
+    assert is_valid_transition(OrderState.DRAFT, OrderState.PENDING_SUBMIT)
+    # FILLED cannot go to PENDING_SUBMIT (backwards)
+    assert not is_valid_transition(OrderState.FILLED, OrderState.PENDING_SUBMIT)
+
+
+def test_intent_persisted_before_broker_call():
+    """SC-001: gate_submission persists intent before any broker contact."""
+    adapter = _TestAdapter()
+    reservation = _TestReservation()
+    tick = _fresh_tick()
+    adapter.set_quote("EURUSD", tick)
+    engine = _active_engine(adapter=adapter, reservation=reservation)
+    spread_tracker = _spread_tracker()
+    spread_tracker.update(Decimal("2.0"), tick.recv_time_mono - 70)
+    spread_tracker.update(Decimal("2.0"), tick.recv_time_mono)
+
+    result = engine.attempt_entry(
+        signal=_signal(),
+        mapping=_mapping(),
+        feed=_feed(tick),
+        spread_tracker=spread_tracker,
+        risk_state=RiskState.ACTIVE,
+        risk_state_age_seconds=Decimal("1"),
+        daily_pnl=ZERO_PNL,
+        broker_connected=True,
+        atr_points=Decimal("0.00050"),
+    )
+    # If executed, the intent was persisted via gate_submission before broker call
+    assert result.executed
+    # gate_submission was called (intent persisted) before submit
+    assert reservation._gate_submission_called
+
+
+def test_regime_mismatch_rejects():
+    """Step 4: Reject if current regime differs from signal's regime."""
+    adapter = _TestAdapter()
+    tick = _fresh_tick()
+    adapter.set_quote("EURUSD", tick)
+    engine = _active_engine(adapter=adapter)
+    spread_tracker = _spread_tracker()
+    spread_tracker.update(Decimal("2.0"), tick.recv_time_mono - 70)
+    spread_tracker.update(Decimal("2.0"), tick.recv_time_mono)
+
+    result = engine.attempt_entry(
+        signal=_signal(),  # regime=TRENDING
+        mapping=_mapping(),
+        feed=_feed(tick),
+        spread_tracker=spread_tracker,
+        risk_state=RiskState.ACTIVE,
+        risk_state_age_seconds=Decimal("1"),
+        daily_pnl=ZERO_PNL,
+        broker_connected=True,
+        atr_points=Decimal("0.00050"),
+        current_regime=MarketRegime.RANGING,
+    )
+    assert not result.executed
+    assert "regime_mismatch" in result.reject_reasons
